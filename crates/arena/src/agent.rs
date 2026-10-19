@@ -1,0 +1,96 @@
+//! 対局する側(エージェント)。TBP の bot プロセスと、同じプロセス内で探索するこのAIの2種類。
+
+use std::io;
+
+use tetrisai_core::{Piece, Placement, PlayerState, Rules};
+use tetrisai_engine::{search, Root, SearchOptions, Weights};
+
+use crate::battle::Player;
+use crate::tbp::TbpBot;
+
+pub trait Agent {
+    /// 局面を渡し直す(対局の最初と、おじゃまがせり上がった後)。
+    fn start(&mut self, player: &Player, bag_state: &[Piece]) -> io::Result<()>;
+    /// 前回の提案どおりに指したことと、新しく見えたミノを伝える。
+    fn play(&mut self, placement: &Placement, new_pieces: &[Piece]) -> io::Result<()>;
+    /// 今の最善手。まだ無ければ None。
+    fn suggest(&mut self) -> io::Result<Option<Placement>>;
+    /// 別スレッドで考え続ける(`suggest` の前に思考時間を待つ必要がある)か。
+    fn thinks_in_background(&self) -> bool;
+    /// 対局の終わり。
+    fn stop(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+    fn name(&self) -> String;
+}
+
+impl Agent for TbpBot {
+    fn start(&mut self, player: &Player, bag_state: &[Piece]) -> io::Result<()> {
+        TbpBot::start(self, player, bag_state)
+    }
+    fn play(&mut self, placement: &Placement, new_pieces: &[Piece]) -> io::Result<()> {
+        TbpBot::play(self, placement, new_pieces)
+    }
+    fn suggest(&mut self) -> io::Result<Option<Placement>> {
+        TbpBot::suggest(self)
+    }
+    fn thinks_in_background(&self) -> bool {
+        true
+    }
+    fn stop(&mut self) -> io::Result<()> {
+        TbpBot::stop(self)
+    }
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+}
+
+/// このAIの探索を同じプロセス内で呼ぶ。思考時間ではなく探索の幅を固定するので、速く・再現性よく回せる
+/// (重みの自動調整に使う)。
+pub struct EngineAgent {
+    pub weights: Weights,
+    pub rules: Rules,
+    pub width: usize,
+    pub label: String,
+    root: Option<Root>,
+}
+
+impl EngineAgent {
+    pub fn new(weights: Weights, rules: Rules, width: usize, label: &str) -> Self {
+        EngineAgent { weights, rules, width, label: label.to_string(), root: None }
+    }
+}
+
+impl Agent for EngineAgent {
+    fn start(&mut self, player: &Player, _bag_state: &[Piece]) -> io::Result<()> {
+        self.root = Some(Root {
+            state: PlayerState { ..player.state },
+            hold: player.hold,
+            queue: player.queue.iter().copied().collect(),
+        });
+        Ok(())
+    }
+
+    fn play(&mut self, placement: &Placement, new_pieces: &[Piece]) -> io::Result<()> {
+        if let Some(root) = self.root.as_mut() {
+            root.play(placement, &self.rules);
+            root.queue.extend_from_slice(new_pieces);
+        }
+        Ok(())
+    }
+
+    fn suggest(&mut self) -> io::Result<Option<Placement>> {
+        let Some(root) = &self.root else { return Ok(None) };
+        let options = SearchOptions { width: self.width, max_depth: 6 };
+        let result = search(root, &options, &self.weights, &self.rules, &|| false);
+        Ok(result.and_then(|r| r.candidates.first().map(|c| c.mv.placement)))
+    }
+
+    fn thinks_in_background(&self) -> bool {
+        false
+    }
+
+    fn name(&self) -> String {
+        self.label.clone()
+    }
+}

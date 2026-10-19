@@ -1,0 +1,13 @@
+[package]
+name = "tetrisai-engine"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "評価関数と探索"
+
+[dependencies]
+tetrisai-core = { path = "../core" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

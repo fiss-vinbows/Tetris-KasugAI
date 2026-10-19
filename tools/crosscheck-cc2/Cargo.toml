@@ -1,0 +1,14 @@
+# Cold Clear 2 の手の生成と、tetrisai-core の手の生成を突き合わせる検証ツール。
+# CC2 のソース(隣の Tetris フォルダのサブモジュール)に依存するため、ワークスペースには入れない。
+[package]
+name = "crosscheck-cc2"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+tetrisai-core = { path = "../../crates/core" }
+cold-clear-2 = { path = "../../../Tetris/external/cold-clear-2" }
+rand = "0.8"
