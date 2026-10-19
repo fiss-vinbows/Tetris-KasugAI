@@ -17,7 +17,8 @@
 //! - `--config <ファイル>`: 評価の重み。`.json` は Cold Clear 2 の設定(`freestyle_weights`)、
 //!   `.toml` はこのAIの重み。TBA は `config/cold_clear_beginner.json` を渡してくる
 //! - `--max-width <数>`: 探索の幅の上限(既定 1024)
-//! - `--no-speculate`: 見えているミノの先を予測して読まない
+//! - `--speculate`: 見えているミノの先を1手予測して読む(計算が6〜7割増える。同じ幅では勝率57%で
+//!   はっきりした差が出なかったので既定では使わない。設計書 8.4)
 
 use std::io::{self, BufRead, Write};
 use std::path::Path;
@@ -71,7 +72,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let weights = load_weights(arg_value(&args, "--config"));
     let max_width: usize = arg_value(&args, "--max-width").and_then(|s| s.parse().ok()).unwrap_or(1024);
-    let speculate = !args.iter().any(|a| a == "--no-speculate");
+    let speculate = args.iter().any(|a| a == "--speculate");
     let rules = Rules::ppt2();
 
     let bot = Arc::new(Bot { shared: Mutex::new(Shared::default()), wake: Condvar::new(), generation: AtomicU64::new(0) });
