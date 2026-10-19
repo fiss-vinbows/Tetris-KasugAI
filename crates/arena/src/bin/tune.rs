@@ -115,7 +115,7 @@ fn set_params(w: &mut Weights, v: &[f64]) {
 
 /// 学習率とずらし幅の減り方(反復回数 k に対して)
 fn learning_rate(k: usize) -> f64 {
-    2.0 / (1.0 + k as f64 / 500.0).powf(0.602)
+    0.5 / (1.0 + k as f64 / 500.0).powf(0.602)
 }
 fn perturbation(k: usize) -> f64 {
     0.25 / (1.0 + k as f64 / 500.0).powf(0.101)
