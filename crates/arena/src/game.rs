@@ -57,6 +57,8 @@ pub fn play_game(bots: [&mut dyn Agent; 2], seed: u64, config: &GameConfig) -> i
             } else if let Some((placement, new_pieces)) = &last[i] {
                 bots[i].play(placement, new_pieces)?;
             }
+            let incoming: Vec<_> = players[i].incoming.iter().copied().collect();
+            bots[i].update_incoming(&incoming)?;
         }
         if bots.iter().any(|b| b.thinks_in_background()) {
             sleep(config.think);

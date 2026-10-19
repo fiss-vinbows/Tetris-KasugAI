@@ -14,6 +14,7 @@
 //!   --a-weights <file> / --b-weights <file>  プロセスを使わず、この重み(TOML。`default` なら既定値)で
 //!                       このAIの探索を直接呼ぶ。思考時間ではなく幅(--width)を固定する
 //!   --width <数>        --a-weights / --b-weights の探索の幅(既定 128)
+//!   --a-no-incoming / --b-no-incoming  --a-weights / --b-weights の側に予告を教えない(比較実験用)
 //!   --record <file>     1局ごとの結果を JSON Lines で書き出す
 
 use std::fs::File;
@@ -35,15 +36,17 @@ enum Engine {
     /// TBP の bot プロセス
     Tbp { exe: PathBuf, args: Vec<String> },
     /// このAIの探索を直接呼ぶ
-    InProcess { weights: Weights, label: String, width: usize },
+    InProcess { weights: Weights, label: String, width: usize, use_incoming: bool },
 }
 
 impl Engine {
     fn create(&self, rules: &Rules) -> Box<dyn Agent + Send> {
         match self {
             Engine::Tbp { exe, args } => Box::new(TbpBot::spawn(exe, args).expect("bot を起動できない")),
-            Engine::InProcess { weights, label, width } => {
-                Box::new(EngineAgent::new(weights.clone(), rules.clone(), *width, label))
+            Engine::InProcess { weights, label, width, use_incoming } => {
+                let mut agent = EngineAgent::new(weights.clone(), rules.clone(), *width, label);
+                agent.use_incoming = *use_incoming;
+                Box::new(agent)
             }
         }
     }
@@ -69,8 +72,10 @@ fn main() {
     let width = num("--width", 128) as usize;
     let engine = |side: &str, default: PathBuf| match get(&format!("--{side}-weights")) {
         Some(path) => {
-            let label = Path::new(&path).file_stem().map_or(path.clone(), |s| s.to_string_lossy().into_owned());
-            Engine::InProcess { weights: load_weights(&path), label, width }
+            let use_incoming = !args.iter().any(|a| *a == format!("--{side}-no-incoming"));
+            let stem = Path::new(&path).file_stem().map_or(path.clone(), |s| s.to_string_lossy().into_owned());
+            let label = if use_incoming { stem } else { format!("{stem}(予告なし)") };
+            Engine::InProcess { weights: load_weights(&path), label, width, use_incoming }
         }
         None => {
             let exe = get(&format!("--{side}")).map(PathBuf::from).unwrap_or(default);

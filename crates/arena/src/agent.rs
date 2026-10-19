@@ -3,9 +3,9 @@
 use std::io;
 
 use tetrisai_core::{Piece, Placement, PlayerState, Rules};
-use tetrisai_engine::{search, Root, SearchOptions, Weights};
+use tetrisai_engine::{search, IncomingGarbage, Root, SearchOptions, Weights};
 
-use crate::battle::Player;
+use crate::battle::{Incoming, Player};
 use crate::tbp::TbpBot;
 
 pub trait Agent {
@@ -13,6 +13,10 @@ pub trait Agent {
     fn start(&mut self, player: &Player, bag_state: &[Piece]) -> io::Result<()>;
     /// 前回の提案どおりに指したことと、新しく見えたミノを伝える。
     fn play(&mut self, placement: &Placement, new_pieces: &[Piece]) -> io::Result<()>;
+    /// 自分への予告を伝える(毎手、考える前に呼ぶ)。
+    fn update_incoming(&mut self, _incoming: &[Incoming]) -> io::Result<()> {
+        Ok(())
+    }
     /// 今の最善手。まだ無ければ None。
     fn suggest(&mut self) -> io::Result<Option<Placement>>;
     /// 別スレッドで考え続ける(`suggest` の前に思考時間を待つ必要がある)か。
@@ -30,6 +34,9 @@ impl Agent for TbpBot {
     }
     fn play(&mut self, placement: &Placement, new_pieces: &[Piece]) -> io::Result<()> {
         TbpBot::play(self, placement, new_pieces)
+    }
+    fn update_incoming(&mut self, incoming: &[Incoming]) -> io::Result<()> {
+        TbpBot::incoming(self, incoming)
     }
     fn suggest(&mut self) -> io::Result<Option<Placement>> {
         TbpBot::suggest(self)
@@ -52,12 +59,14 @@ pub struct EngineAgent {
     pub rules: Rules,
     pub width: usize,
     pub label: String,
+    /// 予告を探索で考えるか(false なら予告を知らないものとして読む。比較実験用)
+    pub use_incoming: bool,
     root: Option<Root>,
 }
 
 impl EngineAgent {
     pub fn new(weights: Weights, rules: Rules, width: usize, label: &str) -> Self {
-        EngineAgent { weights, rules, width, label: label.to_string(), root: None }
+        EngineAgent { weights, rules, width, label: label.to_string(), use_incoming: true, root: None }
     }
 }
 
@@ -67,7 +76,15 @@ impl Agent for EngineAgent {
             state: PlayerState { ..player.state },
             hold: player.hold,
             queue: player.queue.iter().copied().collect(),
+            incoming: Vec::new(),
         });
+        Ok(())
+    }
+
+    fn update_incoming(&mut self, incoming: &[Incoming]) -> io::Result<()> {
+        if let (Some(root), true) = (self.root.as_mut(), self.use_incoming) {
+            root.incoming = incoming.iter().map(|g| IncomingGarbage { lines: g.lines, delay: g.delay }).collect();
+        }
         Ok(())
     }
 

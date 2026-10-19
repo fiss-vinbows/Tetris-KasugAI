@@ -9,6 +9,9 @@
 //!
 //! TBP の拡張(Cold Clear 2 フォークと同じ): `suggestion` に読み筋 `plan`(1手目から最大5手)を付ける。
 //! 独自の拡張: `suggestion` に `difficulty`(`moves` と同じ順の、操作の難しさ)を付ける。
+//! 独自の拡張: `incoming` メッセージ(`{"type": "incoming", "garbage": [{"lines": 4, "delay": 1}, ...]}`)で
+//! 自分への予告を受け取る。`start` にも同じ形の `incoming` を付けられる。Cold Clear 2 は知らないメッセージを
+//! 無視するので、送る側は両方に同じものを送ってよい。
 //!
 //! 起動引数:
 //! - `--config <ファイル>`: 評価の重み。`.json` は Cold Clear 2 の設定(`freestyle_weights`)、
@@ -23,7 +26,7 @@ use std::time::Instant;
 
 use serde_json::{json, Value};
 use tetrisai_core::{Board, Piece, Placement, PlayerState, Rules};
-use tetrisai_engine::{search, Root, SearchOptions, SearchResult, Weights};
+use tetrisai_engine::{search, IncomingGarbage, Root, SearchOptions, SearchResult, Weights};
 
 const PLAN_LEN: usize = 5;
 const MAX_CANDIDATES: usize = 5;
@@ -139,6 +142,14 @@ fn main() {
                 }
                 Err(e) => eprintln!("play を読めない: {e}: {line}"),
             },
+            "incoming" => {
+                let mut s = bot.shared.lock().unwrap();
+                if let Some(root) = s.root.as_mut() {
+                    root.incoming = parse_incoming(&msg["garbage"]);
+                    // それまでの最善手は同じ盤面のものなので残しておく(新しい探索で置き換わる)
+                    bot.bump(&mut s);
+                }
+            }
             "suggest" => {
                 let s = bot.shared.lock().unwrap();
                 send(suggestion(s.best.as_ref()));
@@ -238,7 +249,22 @@ fn parse_start(msg: &Value) -> Option<Root> {
     let combo = msg["combo"].as_u64().unwrap_or(0) as u32;
     let back_to_back = msg["back_to_back"].as_bool().unwrap_or(false);
     let state = PlayerState { board, back_to_back, consecutive_clears: combo };
-    Some(Root { state, hold, queue })
+    Some(Root { state, hold, queue, incoming: parse_incoming(&msg["incoming"]) })
+}
+
+/// 予告の配列(`[{"lines": 4, "delay": 1}, ...]`)を読む。無い・読めない要素は無視する。
+fn parse_incoming(v: &Value) -> Vec<IncomingGarbage> {
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|g| {
+                    let lines = g["lines"].as_u64()? as u32;
+                    let delay = g["delay"].as_u64().unwrap_or(0) as u32;
+                    Some(IncomingGarbage { lines, delay })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn arg_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
@@ -290,7 +316,7 @@ mod tests {
     #[test]
     fn holdを使う手でキューが進む() {
         let rules = Rules::ppt2();
-        let mut root = Root { state: PlayerState::default(), hold: None, queue: vec![Piece::T, Piece::I, Piece::O] };
+        let mut root = Root { queue: vec![Piece::T, Piece::I, Piece::O], ..Default::default() };
         let placement: Placement =
             serde_json::from_value(json!({"location": {"type": "I", "orientation": "north", "x": 4, "y": 0}, "spin": "none"}))
                 .unwrap();

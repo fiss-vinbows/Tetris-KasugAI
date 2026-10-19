@@ -7,19 +7,33 @@
 //! 読む手数: HOLD が空のときに HOLD を使うと、ミノを1つ HOLD に置いたまま終わる。
 //! 比べる手数をそろえるため、HOLD が空なら「見えているミノの数 − 1」手、HOLD があれば
 //! 「見えているミノの数」手まで読む。
+//!
+//! 予告(届く予定のおじゃま)も探索の中で再現する: ラインを消す手は攻撃の分だけ予告を打ち消し(相殺)、
+//! 消さない手では待ち時間の過ぎた予告がせり上がったとみなす。穴の位置は分からないので盤面には足さず、
+//! 「せり上がった分 + まだ残っている予告」を盤面の高さに上乗せして評価する。
 
 use std::collections::HashMap;
 
-use crate::eval::{evaluate, reward, Weights};
-use tetrisai_core::{generate_into, Move, Piece, Placement, PlayerState, Rules};
+use crate::eval::{evaluate, reward, Garbage, Weights};
+use tetrisai_core::{generate_into, ClearResult, Move, Piece, Placement, PlayerState, Rules};
+
+/// 予告の1件(相手の1回の攻撃)。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IncomingGarbage {
+    pub lines: u32,
+    /// あと何手でせり上がれるようになるか(0 なら次にラインを消さない手を置いたときにせり上がる)。
+    pub delay: u32,
+}
 
 /// 探索の出発点(TBP の start で受け取った局面)。
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Root {
     pub state: PlayerState,
     pub hold: Option<Piece>,
     /// `queue[0]` が操作ミノ、続きが NEXT。
     pub queue: Vec<Piece>,
+    /// 自分への予告(古い順)。
+    pub incoming: Vec<IncomingGarbage>,
 }
 
 impl Root {
@@ -93,6 +107,42 @@ struct Node {
     mv: Option<Move>,
     /// この局面に至る1手目の、1手目の層での位置。
     first: u32,
+    /// 予告のうち、相殺かせり上がりで片付いた行数(古いほうから)。
+    consumed: u32,
+    /// 予告のうち、せり上がったとみなした行数。
+    risen: u32,
+}
+
+/// 1手置いた後の予告の状態 (consumed, risen)。`depth` はこの手が何手目か(0 から)。
+fn garbage_after(
+    incoming: &[IncomingGarbage],
+    total: u32,
+    (mut consumed, mut risen): (u32, u32),
+    depth: u32,
+    result: &ClearResult,
+    rules: &Rules,
+) -> (u32, u32) {
+    if result.lines > 0 {
+        if rules.garbage.cancel_incoming_first {
+            consumed += result.attack.min(total - consumed);
+        }
+    } else {
+        // 待ち時間の過ぎた予告を古い順にせり上げる
+        let mut end = 0;
+        for g in incoming {
+            end += g.lines;
+            if end <= consumed {
+                continue;
+            }
+            if g.delay > depth {
+                break;
+            }
+            let n = end - consumed;
+            consumed += n;
+            risen += n;
+        }
+    }
+    (consumed, risen)
 }
 
 /// 探索する。`cancelled` が true を返したら途中でやめて None を返す。
@@ -120,14 +170,18 @@ pub fn search(
         parent: 0,
         mv: None,
         first: 0,
+        consumed: 0,
+        risen: 0,
     }]];
+    let incoming_total: u32 = root.incoming.iter().map(|g| g.lines).sum();
     let mut nodes = 0u64;
     let mut moves = Vec::with_capacity(64);
 
     for depth in 0..depth_limit {
         let parents = &layers[depth];
         let mut children: Vec<Node> = Vec::new();
-        let mut seen: HashMap<(tetrisai_core::Board, Option<Piece>, usize, bool, u32), usize> = HashMap::new();
+        let mut seen: HashMap<(tetrisai_core::Board, Option<Piece>, usize, bool, u32, u32, u32), usize> =
+            HashMap::new();
 
         for (pi, parent) in parents.iter().enumerate() {
             if cancelled() {
@@ -165,12 +219,33 @@ pub fn search(
                     let t_known = hold.map_or(0, |h| (h == Piece::T) as usize)
                         + root.queue[next.min(root.queue.len())..].iter().filter(|&&p| p == Piece::T).count();
                     let t_available = t_known.clamp(1, 2);
-                    let score = r + evaluate(weights, &state.board, state.back_to_back, t_available);
+                    let (consumed, risen) = garbage_after(
+                        &root.incoming,
+                        incoming_total,
+                        (parent.consumed, parent.risen),
+                        depth as u32,
+                        &result,
+                        rules,
+                    );
+                    let pending = incoming_total - consumed;
+                    let garbage = Garbage { extra_height: risen + pending, pending };
+                    let score = r + evaluate(weights, &state.board, state.back_to_back, t_available, garbage);
                     nodes += 1;
 
                     let first = if depth == 0 { u32::MAX } else { parent.first };
-                    let child = Node { state, hold, next, reward: r, score, parent: pi as u32, mv: Some(*mv), first };
-                    let key = (state.board, hold, next, state.back_to_back, state.consecutive_clears);
+                    let child = Node {
+                        state,
+                        hold,
+                        next,
+                        reward: r,
+                        score,
+                        parent: pi as u32,
+                        mv: Some(*mv),
+                        first,
+                        consumed,
+                        risen,
+                    };
+                    let key = (state.board, hold, next, state.back_to_back, state.consecutive_clears, consumed, risen);
                     match seen.get(&key) {
                         Some(&i) if children[i].score >= score => {}
                         Some(&i) => children[i] = child,
@@ -237,7 +312,7 @@ mod tests {
     use tetrisai_core::{Board, Spin};
 
     fn run(board: Board, hold: Option<Piece>, queue: &[Piece], width: usize) -> SearchResult {
-        let root = Root { state: PlayerState::new(board), hold, queue: queue.to_vec() };
+        let root = Root { state: PlayerState::new(board), hold, queue: queue.to_vec(), ..Default::default() };
         let options = SearchOptions { width, max_depth: 6 };
         search(&root, &options, &Weights::default(), &Rules::ppt2(), &|| false).expect("手がある")
     }
@@ -274,8 +349,42 @@ mod tests {
     }
 
     #[test]
+    fn 予告がせり上がると危ないなら相殺する() {
+        // 13段の高さで、右端の井戸に I を入れればテトリス(攻撃4)。予告は8行ですぐせり上がる。
+        // 消さずに積むと 13 + 8 = 21 段で負けなので、テトリスで相殺するはず
+        let mut rows = vec!["#########."; 13];
+        rows.insert(0, "#.........");
+        let board = Board::from_rows(&rows);
+        let root = Root {
+            state: PlayerState::new(board),
+            hold: None,
+            queue: vec![Piece::I, Piece::O, Piece::O],
+            incoming: vec![IncomingGarbage { lines: 8, delay: 0 }],
+        };
+        let r = search(&root, &SearchOptions { width: 64, max_depth: 6 }, &Weights::default(), &Rules::ppt2(), &|| false)
+            .unwrap();
+        let mut state = root.state;
+        let result = state.apply(&r.candidates[0].mv.placement, &Rules::ppt2());
+        assert_eq!(result.lines, 4, "{:?}", r.candidates[0]);
+    }
+
+    #[test]
+    fn 予告の相殺とせり上がりの計算() {
+        let rules = Rules::ppt2();
+        let incoming = [IncomingGarbage { lines: 3, delay: 0 }, IncomingGarbage { lines: 2, delay: 2 }];
+        let clear = ClearResult { lines: 2, attack: 4, ..Default::default() };
+        let none = ClearResult::default();
+        // 攻撃4で古いほうから4行を相殺
+        assert_eq!(garbage_after(&incoming, 5, (0, 0), 0, &clear, &rules), (4, 0));
+        // 消さない手: 1手目(depth 0)では待ち時間0の3行だけせり上がる
+        assert_eq!(garbage_after(&incoming, 5, (0, 0), 0, &none, &rules), (3, 3));
+        // 3手目(depth 2)なら残りの2行もせり上がる
+        assert_eq!(garbage_after(&incoming, 5, (3, 3), 2, &none, &rules), (5, 5));
+    }
+
+    #[test]
     fn 中断できる() {
-        let root = Root { state: PlayerState::default(), hold: None, queue: vec![Piece::T, Piece::I] };
+        let root = Root { queue: vec![Piece::T, Piece::I], ..Default::default() };
         let options = SearchOptions { width: 64, max_depth: 6 };
         assert!(search(&root, &options, &Weights::default(), &Rules::ppt2(), &|| true).is_none());
     }

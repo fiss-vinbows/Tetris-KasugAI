@@ -54,6 +54,19 @@ pub struct Weights {
     pub soft_drop_section: f32,
     /// ソフトドロップを接地前に止める回数1つあたり
     pub mid_air_stop: f32,
+    /// まだ残っている予告1行あたり
+    pub pending_garbage: f32,
+    /// 予告をすべて受けたときに20段を超える分(1段あたり)
+    pub overflow: f32,
+}
+
+/// 予告の影響(探索の中で計算する)。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Garbage {
+    /// 盤面の高さに上乗せする行数(せり上がったとみなした分 + まだ残っている予告)
+    pub extra_height: u32,
+    /// まだ残っている予告の行数
+    pub pending: u32,
 }
 
 impl Default for Weights {
@@ -80,6 +93,8 @@ impl Default for Weights {
             perfect_clear_override: true,
             soft_drop_section: -0.5,
             mid_air_stop: -1.5,
+            pending_garbage: -0.1,
+            overflow: -10.0,
         }
     }
 }
@@ -113,7 +128,8 @@ pub fn reward(w: &Weights, rules: &Rules, mv: &Move, result: &ClearResult) -> f3
 }
 
 /// 盤面の評価。`t_available` は今後使える T の目安(T溝の評価を何回まで重ねるか)。
-pub fn evaluate(w: &Weights, board: &Board, back_to_back: bool, t_available: usize) -> f32 {
+/// `garbage` は予告の影響(高さに上乗せする)。
+pub fn evaluate(w: &Weights, board: &Board, back_to_back: bool, t_available: usize, garbage: Garbage) -> f32 {
     let mut e = 0.0;
     if back_to_back {
         e += w.has_back_to_back;
@@ -156,8 +172,12 @@ pub fn evaluate(w: &Weights, board: &Board, back_to_back: bool, t_available: usi
     let depth = (full_except_well >> well_h).trailing_ones();
     e += w.tetris_well_depth * depth as f32;
 
-    // 高さ
-    let top = board.max_height();
+    // 高さ(予告の分を上乗せ)
+    e += w.pending_garbage * garbage.pending as f32;
+    let top = board.max_height() + garbage.extra_height;
+    if top > 20 {
+        e += w.overflow * (top - 20) as f32;
+    }
     e += w.height * top as f32;
     if top > 10 {
         e += w.height_upper_half * (top - 10) as f32;
@@ -218,7 +238,8 @@ mod tests {
         let w = Weights::default();
         let flat = Board::from_rows(&["#########."]);
         let hole = Board::from_rows(&["#########.", "####.#####"]);
-        assert!(evaluate(&w, &hole, false, 1) < evaluate(&w, &flat, false, 1));
+        let g = Garbage::default();
+        assert!(evaluate(&w, &hole, false, 1, g) < evaluate(&w, &flat, false, 1, g));
     }
 
     #[test]
@@ -232,8 +253,8 @@ mod tests {
         let loc = tslot_left(&board).or_else(|| tslot_right(&board));
         assert!(loc.is_some());
         let w = Weights::default();
-        let with = evaluate(&w, &board, false, 1);
-        let without = evaluate(&w, &board, false, 0);
+        let with = evaluate(&w, &board, false, 1, Garbage::default());
+        let without = evaluate(&w, &board, false, 0, Garbage::default());
         assert!((with - without - w.tslot[2]).abs() < 1e-5, "TSD の溝は tslot[2] の点");
     }
 

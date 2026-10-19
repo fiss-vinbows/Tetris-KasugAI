@@ -7,7 +7,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use serde_json::{json, Value};
 use tetrisai_core::{Piece, Placement};
 
-use crate::battle::Player;
+use crate::battle::{Incoming, Player};
 
 pub struct TbpBot {
     child: Child,
@@ -80,6 +80,12 @@ impl TbpBot {
             self.send(&json!({"type": "new_piece", "piece": p.to_char().to_string()}))?;
         }
         Ok(())
+    }
+
+    /// 自分への予告を伝える(このAIの独自の拡張。Cold Clear 2 は知らないメッセージとして無視する)。
+    pub fn incoming(&mut self, incoming: &[Incoming]) -> io::Result<()> {
+        let garbage: Vec<Value> = incoming.iter().map(|g| json!({"lines": g.lines, "delay": g.delay})).collect();
+        self.send(&json!({"type": "incoming", "garbage": garbage}))
     }
 
     /// 今の最善手を聞く。まだ無ければ None。
