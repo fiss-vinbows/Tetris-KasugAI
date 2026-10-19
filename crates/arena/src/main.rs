@@ -17,6 +17,7 @@
 //!   --a-no-incoming / --b-no-incoming  --a-weights / --b-weights の側に予告を教えない(比較実験用)
 //!   --a-speculate / --b-speculate      --a-weights / --b-weights の側で、見えているミノの先を予測して読む
 //!   --record <file>     1局ごとの結果を JSON Lines で書き出す
+//!   --adjudicate        手数の上限に達したら危なさ(高さ + 予告)の小さいほうを勝ちにする(同じAI同士の比較用)
 
 use std::fs::File;
 use std::io::Write;
@@ -103,7 +104,7 @@ fn main() {
         rules: Rules::ppt2(),
         think: Duration::from_millis(num("--think-ms", 100)),
         max_pieces: num("--max-pieces", 500) as u32,
-        adjudicate: false,
+        adjudicate: args.iter().any(|a| a == "--adjudicate"),
     });
     let mut record = get("--record").map(|path| File::create(path).expect("記録ファイルを作れない"));
 
