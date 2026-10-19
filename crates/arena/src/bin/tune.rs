@@ -17,6 +17,8 @@
 //!   --threads <数>         同時に進める対局数(既定: 論理コア数)
 //!   --max-pieces <数>      1人あたりの手数の上限。達したら危なさ(高さ + 予告)で判定する(既定 300)
 //!   --init <file>          最初の重み(TOML。既定は既定値)
+//!   --lr <数>              最初の学習率(既定 0.5)
+//!   --c <数>               最初のずらし幅(重みの大きさに対する割合。既定 0.25)
 
 use std::fs;
 use std::io::Write;
@@ -120,11 +122,11 @@ fn set_params(w: &mut Weights, v: &[f64]) {
 }
 
 /// 学習率とずらし幅の減り方(反復回数 k に対して)
-fn learning_rate(k: usize) -> f64 {
-    0.5 / (1.0 + k as f64 / 500.0).powf(0.602)
+fn learning_rate(lr0: f64, k: usize) -> f64 {
+    lr0 / (1.0 + k as f64 / 500.0).powf(0.602)
 }
-fn perturbation(k: usize) -> f64 {
-    0.25 / (1.0 + k as f64 / 500.0).powf(0.101)
+fn perturbation(c0: f64, k: usize) -> f64 {
+    c0 / (1.0 + k as f64 / 500.0).powf(0.101)
 }
 
 fn main() {
@@ -138,6 +140,8 @@ fn main() {
     let max_iterations = get("--iterations").map(|s| s.parse::<usize>().unwrap()).unwrap_or(usize::MAX);
     let games = (num("--games", 24.0) as usize / 2 * 2).max(2);
     let width = num("--width", 64.0) as usize;
+    let lr0 = num("--lr", 0.5);
+    let c0 = num("--c", 0.25);
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
     let threads = num("--threads", cores as f64) as usize;
     let rules = Rules::ppt2();
@@ -181,7 +185,7 @@ fn main() {
     let mut recent = Vec::new();
 
     while started.elapsed() < deadline && k < max_iterations {
-        let c = perturbation(k);
+        let c = perturbation(c0, k);
         let delta: Vec<f64> = (0..NAMES.len()).map(|_| if rng.gen::<bool>() { 1.0 } else { -1.0 }).collect();
         let shift: Vec<f64> = (0..NAMES.len()).map(|i| c * scale[i] * delta[i]).collect();
         let mut plus = base.clone();
@@ -223,7 +227,7 @@ fn main() {
         });
         let (pw, mw, draws, pieces) = tally.into_inner().unwrap();
         let score = (pw as f64 - mw as f64) / games as f64;
-        let lr = learning_rate(k);
+        let lr = learning_rate(lr0, k);
         for i in 0..theta.len() {
             theta[i] += lr * shift[i] * score;
         }
