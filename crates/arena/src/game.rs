@@ -19,8 +19,11 @@ pub struct GameConfig {
     pub rules: Rules,
     /// 1手あたりの思考時間
     pub think: Duration,
-    /// 1人あたりの手数の上限(超えたら引き分け)
+    /// 1人あたりの手数の上限(超えたら引き分け。`adjudicate` なら判定)
     pub max_pieces: u32,
+    /// 手数の上限に達したら、危なさ(盤面の高さ + 残っている予告の行数)の小さいほうを勝ちにする。
+    /// 自動調整で引き分けを減らすために使う(引き分けからは勝敗の手がかりが得られないため)
+    pub adjudicate: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -30,6 +33,8 @@ pub struct GameResult {
     pub winner: Option<usize>,
     pub losses: [Option<Loss>; 2],
     pub stats: [Stats; 2],
+    /// 手数の上限で判定して勝敗を決めたか
+    pub adjudicated: bool,
 }
 
 /// 提案がまだ無いときに聞き直す回数と間隔
@@ -102,11 +107,22 @@ pub fn play_game(bots: [&mut dyn Agent; 2], seed: u64, config: &GameConfig) -> i
         bot.stop()?;
     }
     let losses = [players[0].loss, players[1].loss];
+    let mut adjudicated = false;
     let winner = match losses {
         [None, Some(_)] => Some(0),
         [Some(_), None] => Some(1),
+        [None, None] if config.adjudicate => {
+            let danger = |p: &Player| p.state.board.max_height() + p.incoming_lines();
+            let (d0, d1) = (danger(&players[0]), danger(&players[1]));
+            adjudicated = d0 != d1;
+            match d0.cmp(&d1) {
+                std::cmp::Ordering::Less => Some(0),
+                std::cmp::Ordering::Greater => Some(1),
+                std::cmp::Ordering::Equal => None,
+            }
+        }
         _ => None,
     };
     let [p0, p1] = players;
-    Ok(GameResult { seed, winner, losses, stats: [p0.stats, p1.stats] })
+    Ok(GameResult { seed, winner, losses, stats: [p0.stats, p1.stats], adjudicated })
 }

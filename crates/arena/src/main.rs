@@ -15,6 +15,7 @@
 //!                       このAIの探索を直接呼ぶ。思考時間ではなく幅(--width)を固定する
 //!   --width <数>        --a-weights / --b-weights の探索の幅(既定 128)
 //!   --a-no-incoming / --b-no-incoming  --a-weights / --b-weights の側に予告を教えない(比較実験用)
+//!   --a-speculate / --b-speculate      --a-weights / --b-weights の側で、見えているミノの先を予測して読む
 //!   --record <file>     1局ごとの結果を JSON Lines で書き出す
 
 use std::fs::File;
@@ -36,16 +37,17 @@ enum Engine {
     /// TBP の bot プロセス
     Tbp { exe: PathBuf, args: Vec<String> },
     /// このAIの探索を直接呼ぶ
-    InProcess { weights: Weights, label: String, width: usize, use_incoming: bool },
+    InProcess { weights: Weights, label: String, width: usize, use_incoming: bool, speculate: bool },
 }
 
 impl Engine {
     fn create(&self, rules: &Rules) -> Box<dyn Agent + Send> {
         match self {
             Engine::Tbp { exe, args } => Box::new(TbpBot::spawn(exe, args).expect("bot を起動できない")),
-            Engine::InProcess { weights, label, width, use_incoming } => {
+            Engine::InProcess { weights, label, width, use_incoming, speculate } => {
                 let mut agent = EngineAgent::new(weights.clone(), rules.clone(), *width, label);
                 agent.use_incoming = *use_incoming;
+                agent.speculate = *speculate;
                 Box::new(agent)
             }
         }
@@ -74,8 +76,15 @@ fn main() {
         Some(path) => {
             let use_incoming = !args.iter().any(|a| *a == format!("--{side}-no-incoming"));
             let stem = Path::new(&path).file_stem().map_or(path.clone(), |s| s.to_string_lossy().into_owned());
-            let label = if use_incoming { stem } else { format!("{stem}(予告なし)") };
-            Engine::InProcess { weights: load_weights(&path), label, width, use_incoming }
+            let speculate = args.iter().any(|a| *a == format!("--{side}-speculate"));
+            let mut label = stem;
+            if !use_incoming {
+                label += "(予告なし)";
+            }
+            if speculate {
+                label += "(予測)";
+            }
+            Engine::InProcess { weights: load_weights(&path), label, width, use_incoming, speculate }
         }
         None => {
             let exe = get(&format!("--{side}")).map(PathBuf::from).unwrap_or(default);
@@ -94,6 +103,7 @@ fn main() {
         rules: Rules::ppt2(),
         think: Duration::from_millis(num("--think-ms", 100)),
         max_pieces: num("--max-pieces", 500) as u32,
+        adjudicate: false,
     });
     let mut record = get("--record").map(|path| File::create(path).expect("記録ファイルを作れない"));
 

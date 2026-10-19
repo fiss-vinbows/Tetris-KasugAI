@@ -17,6 +17,7 @@
 //! - `--config <ファイル>`: 評価の重み。`.json` は Cold Clear 2 の設定(`freestyle_weights`)、
 //!   `.toml` はこのAIの重み。TBA は `config/cold_clear_beginner.json` を渡してくる
 //! - `--max-width <数>`: 探索の幅の上限(既定 1024)
+//! - `--no-speculate`: 見えているミノの先を予測して読まない
 
 use std::io::{self, BufRead, Write};
 use std::path::Path;
@@ -70,13 +71,14 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let weights = load_weights(arg_value(&args, "--config"));
     let max_width: usize = arg_value(&args, "--max-width").and_then(|s| s.parse().ok()).unwrap_or(1024);
+    let speculate = !args.iter().any(|a| a == "--no-speculate");
     let rules = Rules::ppt2();
 
     let bot = Arc::new(Bot { shared: Mutex::new(Shared::default()), wake: Condvar::new(), generation: AtomicU64::new(0) });
     {
         let bot = bot.clone();
         let rules = rules.clone();
-        std::thread::spawn(move || worker(&bot, &weights, &rules, max_width));
+        std::thread::spawn(move || worker(&bot, &weights, &rules, max_width, speculate));
     }
 
     let stdout = io::stdout();
@@ -121,7 +123,7 @@ fn main() {
                 Some(piece) => {
                     let mut s = bot.shared.lock().unwrap();
                     if let Some(root) = s.root.as_mut() {
-                        root.queue.push(piece);
+                        root.push_piece(piece);
                         s.pending_start = false;
                         // それまでの最善手は同じ局面のものなので残しておく(新しい探索で置き換わる)
                         bot.bump(&mut s);
@@ -167,7 +169,7 @@ fn main() {
 }
 
 /// 探索スレッド: 局面が変わるたびに、幅を広げながら探索を繰り返す。
-fn worker(bot: &Bot, weights: &Weights, rules: &Rules, max_width: usize) {
+fn worker(bot: &Bot, weights: &Weights, rules: &Rules, max_width: usize, speculate: bool) {
     loop {
         let (root, generation) = {
             let mut s = bot.shared.lock().unwrap();
@@ -183,7 +185,7 @@ fn worker(bot: &Bot, weights: &Weights, rules: &Rules, max_width: usize) {
         let mut nodes = 0u64;
         let mut width = 8;
         while width <= max_width {
-            let options = SearchOptions { width, max_depth: 6 };
+            let options = SearchOptions { width, max_depth: 6, speculate };
             let Some(result) = search(&root, &options, weights, rules, &cancelled) else { break };
             nodes += result.nodes;
             let nps = nodes as f64 / started.elapsed().as_secs_f64().max(1e-9);
@@ -249,7 +251,12 @@ fn parse_start(msg: &Value) -> Option<Root> {
     let combo = msg["combo"].as_u64().unwrap_or(0) as u32;
     let back_to_back = msg["back_to_back"].as_bool().unwrap_or(false);
     let state = PlayerState { board, back_to_back, consecutive_clears: combo };
-    Some(Root { state, hold, queue, incoming: parse_incoming(&msg["incoming"]) })
+    // 7種1巡の残り(TBP の randomizer.bag_state)。無ければ空(7種どれでも来うる)
+    let bag = msg["randomizer"]["bag_state"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|p| p.as_str().and_then(parse_piece)).collect())
+        .unwrap_or_default();
+    Some(Root { state, hold, queue, incoming: parse_incoming(&msg["incoming"]), bag })
 }
 
 /// 予告の配列(`[{"lines": 4, "delay": 1}, ...]`)を読む。無い・読めない要素は無視する。

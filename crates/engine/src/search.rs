@@ -8,6 +8,9 @@
 //! 比べる手数をそろえるため、HOLD が空なら「見えているミノの数 − 1」手、HOLD があれば
 //! 「見えているミノの数」手まで読む。
 //!
+//! 予測の1手(`speculate`): 見えているミノを使い切った局面に、次に来うるミノ(袋の残りから絞る)を
+//! それぞれ一番良い場所へ置いてみて、その平均を局面の点数にする。運の悪いミノが来ると困る形を避けられる。
+//!
 //! 予告(届く予定のおじゃま)も探索の中で再現する: ラインを消す手は攻撃の分だけ予告を打ち消し(相殺)、
 //! 消さない手では待ち時間の過ぎた予告がせり上がったとみなす。穴の位置は分からないので盤面には足さず、
 //! 「せり上がった分 + まだ残っている予告」を盤面の高さに上乗せして評価する。
@@ -34,6 +37,31 @@ pub struct Root {
     pub queue: Vec<Piece>,
     /// 自分への予告(古い順)。
     pub incoming: Vec<IncomingGarbage>,
+    /// NEXT の最後のミノの後で、今の袋(7種1巡)に残っているミノ。空なら次は新しい袋(7種どれでも)。
+    /// 袋の情報が無いときも空にしておく(7種どれでも来うるとみなす)。
+    pub bag: Vec<Piece>,
+}
+
+impl Root {
+    /// 新しく見えたミノを NEXT の最後に足し、袋の残りを更新する。
+    pub fn push_piece(&mut self, piece: Piece) {
+        self.queue.push(piece);
+        if self.bag.is_empty() {
+            self.bag = Piece::ALL.to_vec();
+        }
+        if let Some(i) = self.bag.iter().position(|&p| p == piece) {
+            self.bag.remove(i);
+        }
+    }
+
+    /// 見えている NEXT の次に来うるミノ。
+    fn possible_next(&self) -> Vec<Piece> {
+        if self.bag.is_empty() {
+            Piece::ALL.to_vec()
+        } else {
+            self.bag.clone()
+        }
+    }
 }
 
 impl Root {
@@ -69,6 +97,8 @@ pub struct SearchOptions {
     pub width: usize,
     /// 読む手数の上限。
     pub max_depth: usize,
+    /// 見えているミノの先を1手だけ予測して読むか。
+    pub speculate: bool,
 }
 
 /// 1手目の候補。
@@ -278,6 +308,55 @@ pub fn search(
         return None; // 置ける手が無い
     }
 
+    if options.speculate {
+        let possible = root.possible_next();
+        let mut leaves = std::mem::take(&mut layers[last]);
+        for node in leaves.iter_mut() {
+            if cancelled() {
+                return None;
+            }
+            // 次の操作ミノ: まだ見えているミノが残っていればそれ、無ければ袋の残りのどれか
+            let candidates: Vec<Piece> = match root.queue.get(node.next) {
+                Some(&p) => vec![p],
+                None => possible.clone(),
+            };
+            let mut sum = 0.0;
+            for &piece in &candidates {
+                let mut best = f32::NEG_INFINITY;
+                // 来たミノか HOLD のミノのどちらかを置ける
+                for use_piece in [Some(piece), node.hold.filter(|&h| h != piece)].into_iter().flatten() {
+                    generate_into(&node.state.board, use_piece, spawn, &mut moves);
+                    for mv in &moves {
+                        if mv.placement.location.cells().iter().all(|&(_, y)| y >= LOCK_OUT_Y) {
+                            continue;
+                        }
+                        let mut state = node.state;
+                        let result = state.apply(&mv.placement, rules);
+                        let (consumed, risen) = garbage_after(
+                            &root.incoming,
+                            incoming_total,
+                            (node.consumed, node.risen),
+                            last as u32,
+                            &result,
+                            rules,
+                        );
+                        let pending = incoming_total - consumed;
+                        let garbage = Garbage { extra_height: risen + pending, pending };
+                        let s = node.reward
+                            + reward(weights, rules, mv, &result)
+                            + evaluate(weights, &state.board, state.back_to_back, 1, garbage);
+                        nodes += 1;
+                        best = best.max(s);
+                    }
+                }
+                // 置けないミノが来たら負け
+                sum += if best.is_finite() { best } else { -1000.0 };
+            }
+            node.score = sum / candidates.len() as f32;
+        }
+        layers[last] = leaves;
+    }
+
     // 1手目ごとの最善の点数
     let mut best_of_first = vec![f32::NEG_INFINITY; layers[1].len()];
     for node in &layers[last] {
@@ -313,7 +392,7 @@ mod tests {
 
     fn run(board: Board, hold: Option<Piece>, queue: &[Piece], width: usize) -> SearchResult {
         let root = Root { state: PlayerState::new(board), hold, queue: queue.to_vec(), ..Default::default() };
-        let options = SearchOptions { width, max_depth: 6 };
+        let options = SearchOptions { width, max_depth: 6, speculate: false };
         search(&root, &options, &Weights::default(), &Rules::ppt2(), &|| false).expect("手がある")
     }
 
@@ -360,9 +439,10 @@ mod tests {
             hold: None,
             queue: vec![Piece::I, Piece::O, Piece::O],
             incoming: vec![IncomingGarbage { lines: 8, delay: 0 }],
+            ..Default::default()
         };
-        let r = search(&root, &SearchOptions { width: 64, max_depth: 6 }, &Weights::default(), &Rules::ppt2(), &|| false)
-            .unwrap();
+        let options = SearchOptions { width: 64, max_depth: 6, speculate: false };
+        let r = search(&root, &options, &Weights::default(), &Rules::ppt2(), &|| false).unwrap();
         let mut state = root.state;
         let result = state.apply(&r.candidates[0].mv.placement, &Rules::ppt2());
         assert_eq!(result.lines, 4, "{:?}", r.candidates[0]);
@@ -385,7 +465,29 @@ mod tests {
     #[test]
     fn 中断できる() {
         let root = Root { queue: vec![Piece::T, Piece::I], ..Default::default() };
-        let options = SearchOptions { width: 64, max_depth: 6 };
+        let options = SearchOptions { width: 64, max_depth: 6, speculate: false };
         assert!(search(&root, &options, &Weights::default(), &Rules::ppt2(), &|| true).is_none());
+    }
+
+    #[test]
+    fn 予測の1手を読んでも1手目は候補の先頭と同じ() {
+        let root = Root {
+            queue: vec![Piece::T, Piece::I, Piece::O],
+            bag: vec![Piece::S, Piece::Z],
+            ..Default::default()
+        };
+        let options = SearchOptions { width: 32, max_depth: 6, speculate: true };
+        let r = search(&root, &options, &Weights::default(), &Rules::ppt2(), &|| false).unwrap();
+        assert_eq!(r.plan[0].placement, r.candidates[0].mv.placement);
+    }
+
+    #[test]
+    fn 袋の残りの更新() {
+        let mut root = Root { bag: vec![Piece::S], ..Default::default() };
+        root.push_piece(Piece::S);
+        assert!(root.bag.is_empty(), "袋を使い切った");
+        assert_eq!(root.possible_next().len(), 7, "次は新しい袋");
+        root.push_piece(Piece::T);
+        assert_eq!(root.bag.len(), 6);
     }
 }

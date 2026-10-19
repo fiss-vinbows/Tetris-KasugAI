@@ -15,7 +15,7 @@
 //!   --games <数>           1回の反復の対局数(偶数。既定 24)
 //!   --width <数>           探索の幅(既定 64)
 //!   --threads <数>         同時に進める対局数(既定: 論理コア数)
-//!   --max-pieces <数>      1人あたりの手数の上限(既定 400)
+//!   --max-pieces <数>      1人あたりの手数の上限。達したら危なさ(高さ + 予告)で判定する(既定 300)
 //!   --init <file>          最初の重み(TOML。既定は既定値)
 
 use std::fs;
@@ -141,7 +141,12 @@ fn main() {
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
     let threads = num("--threads", cores as f64) as usize;
     let rules = Rules::ppt2();
-    let config = GameConfig { rules: rules.clone(), think: Duration::ZERO, max_pieces: num("--max-pieces", 400.0) as u32 };
+    let config = GameConfig {
+        rules: rules.clone(),
+        think: Duration::ZERO,
+        max_pieces: num("--max-pieces", 300.0) as u32,
+        adjudicate: true,
+    };
 
     let base = match get("--init") {
         Some(path) => toml::from_str(&fs::read_to_string(&path).expect("最初の重みを読めない")).expect("最初の重みの形式が違う"),

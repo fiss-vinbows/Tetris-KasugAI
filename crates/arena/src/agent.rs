@@ -61,22 +61,27 @@ pub struct EngineAgent {
     pub label: String,
     /// 予告を探索で考えるか(false なら予告を知らないものとして読む。比較実験用)
     pub use_incoming: bool,
+    /// 見えているミノの先を1手だけ予測して読むか
+    pub speculate: bool,
     root: Option<Root>,
 }
 
 impl EngineAgent {
     pub fn new(weights: Weights, rules: Rules, width: usize, label: &str) -> Self {
-        EngineAgent { weights, rules, width, label: label.to_string(), use_incoming: true, root: None }
+        EngineAgent { weights, rules, width, label: label.to_string(), use_incoming: true, speculate: false, root: None }
     }
 }
 
 impl Agent for EngineAgent {
-    fn start(&mut self, player: &Player, _bag_state: &[Piece]) -> io::Result<()> {
+    fn start(&mut self, player: &Player, bag_state: &[Piece]) -> io::Result<()> {
+        // 袋の切れ目(7個まるごと残っている)は「次は新しい袋」なので空にする
+        let bag = if bag_state.len() == 7 { Vec::new() } else { bag_state.to_vec() };
         self.root = Some(Root {
             state: PlayerState { ..player.state },
             hold: player.hold,
             queue: player.queue.iter().copied().collect(),
             incoming: Vec::new(),
+            bag,
         });
         Ok(())
     }
@@ -91,14 +96,16 @@ impl Agent for EngineAgent {
     fn play(&mut self, placement: &Placement, new_pieces: &[Piece]) -> io::Result<()> {
         if let Some(root) = self.root.as_mut() {
             root.play(placement, &self.rules);
-            root.queue.extend_from_slice(new_pieces);
+            for &p in new_pieces {
+                root.push_piece(p);
+            }
         }
         Ok(())
     }
 
     fn suggest(&mut self) -> io::Result<Option<Placement>> {
         let Some(root) = &self.root else { return Ok(None) };
-        let options = SearchOptions { width: self.width, max_depth: 6 };
+        let options = SearchOptions { width: self.width, max_depth: 6, speculate: self.speculate };
         let result = search(root, &options, &self.weights, &self.rules, &|| false);
         Ok(result.and_then(|r| r.candidates.first().map(|c| c.mv.placement)))
     }
