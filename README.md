@@ -10,6 +10,7 @@ TBA(Tetris Beginner Assistance、`../Tetris`)の思考エンジン Cold Clear 2 
 - `crates/bot/` — TBP 互換の実行ファイル `tetrisai-bot.exe`(Cold Clear 2 と差し替えて使う)
 - `crates/arena/` — ぷよテト2ルールの対戦シミュレーター `tetrisai-arena.exe`(TBP の bot 同士を対戦させる)
 - `config/rules/ppt2.toml` — ぷよテト2のルールの数値(「暫定」は実機で要確認)
+- `config/weights/tuned.toml` — 自己対戦で自動調整した評価の重み(最終版)。bot に `--config` で渡す
 - `tools/crosscheck-cc2/` — Cold Clear 2 との手の生成の突き合わせ
 - `tools/crosscheck_tba.py` — TBA の SRS 到達判定との突き合わせ
 - `tools/tba_harness.py` — TBA の Cold Clear 2 クライアントを bot に差し替えて、TBA のテスト・自己対戦を動かす
@@ -60,6 +61,18 @@ TBA の自己対戦を Cold Clear 2 と bot で並べて比べる:
 ```bash
 cargo build --release -p tetrisai-bot -p tetrisai-arena
 target/release/tetrisai-arena.exe --games 100 --think-ms 100 --record records/result.jsonl
+```
+
+評価の重みの自動調整(SPSA。途中経過は records/ に保存され、続きから再開できる。オプションは crates/arena/src/bin/tune.rs の先頭):
+
+```bash
+target/release/tune.exe --out records/tune_new --init config/weights/tuned.toml --hours 2 --width 128 --games 64
+```
+
+調整した重みの bot と Cold Clear 2 を対戦させる:
+
+```bash
+target/release/tetrisai-arena.exe --a-config config/weights/tuned.toml --games 200 --think-ms 100
 ```
 
 手の生成の速さ:
