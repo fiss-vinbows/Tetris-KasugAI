@@ -57,3 +57,73 @@ fn おじゃまの穴を使ったtstを読み筋に入れる() {
         );
     }
 }
+
+/// 相殺外しの局面: こちらは低く(5段)TSD の溝があり、予告が2行(すぐせり上がる)来ている。
+/// 操作ミノ T、NEXT O・I・L・J。`opponent_height` は相手の盤面の高さ(T溝やテトリスの井戸は無い)。
+fn counter_position(opponent_height: usize) -> Root {
+    let board = Board::from_rows(&[
+        "##........",
+        "#...######",
+        "##.#######",
+        "#########.",
+        "#########.",
+    ]);
+    // 穴の列が行ごとにずれたおじゃまの山(攻撃の準備が無い盤面)
+    let rows: Vec<String> = (0..opponent_height)
+        .map(|i| (0..10).map(|x| if x == (i * 3) % 10 { '.' } else { '#' }).collect())
+        .collect();
+    let opponent = Board::from_rows(&rows.iter().map(|r| r.as_str()).collect::<Vec<_>>());
+    Root {
+        state: PlayerState::new(board),
+        queue: vec![Piece::T, Piece::O, Piece::I, Piece::L, Piece::J],
+        incoming: vec![tetrisai_engine::IncomingGarbage { lines: 2, delay: 0 }],
+        opponent: Some(tetrisai_engine::Opponent { board: opponent, incoming: 0, gauge: 0, back_to_back: false }),
+        ..Default::default()
+    }
+}
+
+fn first_move_clears(root: &Root, weights: &Weights) -> (u32, Vec<(Piece, Spin, u32)>) {
+    let options = SearchOptions { width: 256, max_depth: 6, speculate: false };
+    let r = search(root, &options, weights, &Rules::ppt2(), &|| false).unwrap();
+    let clears = plan_clears(root, &r);
+    (clears[0].2, clears)
+}
+
+/// 相手が高い(17段、余裕3段)なら、すぐ TSD を撃つと2行が相殺に消えて届くのは2行(とどめに足りない)。
+/// いったん受けてから TSD を撃てば4行届いてとどめになるので、すぐには撃たない(相殺を外してカウンターする)。
+#[test]
+fn 相手が高いときは相殺を外して受けてから撃つ() {
+    for (name, weights) in [("既定", Weights::default()), ("最終版", tuned_weights())] {
+        let root = counter_position(17);
+        let (first_lines, clears) = first_move_clears(&root, &weights);
+        println!("{name}(相手17段): {clears:?}");
+        assert_eq!(first_lines, 0, "{name}: 1手目で消して相殺している: {clears:?}");
+        assert!(
+            clears.iter().any(|&(p, spin, lines)| p == Piece::T && spin == Spin::Full && lines == 2),
+            "{name}: 読み筋に TSD が無い: {clears:?}"
+        );
+    }
+}
+
+/// 相手が低い(4段)ならとどめの見込みは無いので、すぐ TSD を撃って相殺する。
+#[test]
+fn 相手が低いときはすぐ撃って相殺する() {
+    for (name, weights) in [("既定", Weights::default()), ("最終版", tuned_weights())] {
+        let root = counter_position(4);
+        let (first_lines, clears) = first_move_clears(&root, &weights);
+        println!("{name}(相手4段): {clears:?}");
+        assert_eq!(first_lines, 2, "{name}: すぐ TSD で相殺していない: {clears:?}");
+    }
+}
+
+/// 相手の情報が無ければとどめの見込みも分からないので、相手が低いときと同じくすぐ撃って相殺する
+/// (相殺を外す判断が、相手を見て決めたものであることの確認)。
+#[test]
+fn 相手の情報が無ければすぐ撃って相殺する() {
+    for (name, weights) in [("既定", Weights::default()), ("最終版", tuned_weights())] {
+        let root = Root { opponent: None, ..counter_position(17) };
+        let (first_lines, clears) = first_move_clears(&root, &weights);
+        println!("{name}(相手の情報なし): {clears:?}");
+        assert_eq!(first_lines, 2, "{name}: すぐ TSD で相殺していない: {clears:?}");
+    }
+}
