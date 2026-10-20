@@ -167,6 +167,7 @@ mod tests {
         assert_eq!(rules.line_attack(3, Spin::Full), 6);
         assert_eq!(rules.combo_attack(0), 0);
         assert_eq!(rules.combo_attack(2), 1);
+        assert_eq!(rules.combo_attack(10), 5, "10REN(11回目)は5段");
         assert_eq!(rules.combo_attack(100), 5, "表より長いRENは最後の値");
     }
 

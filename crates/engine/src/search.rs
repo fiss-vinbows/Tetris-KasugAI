@@ -157,19 +157,24 @@ fn garbage_after(
             consumed += result.attack.min(total - consumed);
         }
     } else {
-        // 待ち時間の過ぎた予告を古い順にせり上げる
+        // 待ち時間の過ぎた予告を古い順にせり上げる(1回の固定で max_rise_per_piece 行まで。0 は上限なし)
+        let mut budget = match rules.garbage.max_rise_per_piece {
+            0 => u32::MAX,
+            n => n,
+        };
         let mut end = 0;
         for g in incoming {
             end += g.lines;
             if end <= consumed {
                 continue;
             }
-            if g.delay > depth {
+            if g.delay > depth || budget == 0 {
                 break;
             }
-            let n = end - consumed;
+            let n = (end - consumed).min(budget);
             consumed += n;
             risen += n;
+            budget -= n;
         }
     }
     (consumed, risen)
@@ -460,6 +465,11 @@ mod tests {
         assert_eq!(garbage_after(&incoming, 5, (0, 0), 0, &none, &rules), (3, 3));
         // 3手目(depth 2)なら残りの2行もせり上がる
         assert_eq!(garbage_after(&incoming, 5, (3, 3), 2, &none, &rules), (5, 5));
+        // 1回の固定でせり上がるのは7行まで(ぷよテト2)
+        assert_eq!(rules.garbage.max_rise_per_piece, 7);
+        let big = [IncomingGarbage { lines: 10, delay: 0 }];
+        assert_eq!(garbage_after(&big, 10, (0, 0), 0, &none, &rules), (7, 7));
+        assert_eq!(garbage_after(&big, 10, (7, 7), 1, &none, &rules), (10, 10));
     }
 
     #[test]
