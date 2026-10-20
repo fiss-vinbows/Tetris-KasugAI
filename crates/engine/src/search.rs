@@ -14,11 +14,16 @@
 //! 予告(届く予定のおじゃま)も探索の中で再現する: ラインを消す手は攻撃の分だけ予告を打ち消し(相殺)、
 //! 消さない手では待ち時間の過ぎた予告がせり上がったとみなす。穴の位置は分からないので盤面には足さず、
 //! 「せり上がった分 + まだ残っている予告」を盤面の高さに上乗せして評価する。
+//!
+//! 対戦の駆け引き(M4): 消した手の攻撃のうち相殺に使わなかった分を「相手に届く攻撃」として積み上げ、
+//! 相手の危なさ(相手の高さ + 相手への予告)に応じて評価する(`eval::battle_value`)。相手が高いと
+//! 届く攻撃の価値が上がるので、予告が来ていてもすぐ消して相殺せず、受けてから撃つ(相殺を外して
+//! カウンターする)手が選ばれやすくなる。相手が次に撃てる攻撃の見積もりも、自分の高さの余裕として見る。
 
 use std::collections::HashMap;
 
-use crate::eval::{evaluate, reward, Garbage, Weights};
-use tetrisai_core::{generate_into, ClearResult, Move, Piece, Placement, PlayerState, Rules};
+use crate::eval::{battle_value, evaluate, opponent_threat, reward, BattleContext, Garbage, Weights};
+use tetrisai_core::{generate_into, Board, ClearResult, Move, Piece, Placement, PlayerState, Rules};
 
 /// 予告の1件(相手の1回の攻撃)。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -26,6 +31,17 @@ pub struct IncomingGarbage {
     pub lines: u32,
     /// あと何手でせり上がれるようになるか(0 なら次にラインを消さない手を置いたときにせり上がる)。
     pub delay: u32,
+}
+
+/// 相手の情報(分かる範囲で)。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Opponent {
+    pub board: Board,
+    /// 相手への予告(こちらが送って、相手がまだ受けていない攻撃)の行数
+    pub incoming: u32,
+    /// 相手の攻撃ゲージ(相手が REN 中にためている攻撃)
+    pub gauge: u32,
+    pub back_to_back: bool,
 }
 
 /// 探索の出発点(TBP の start で受け取った局面)。
@@ -40,6 +56,10 @@ pub struct Root {
     /// NEXT の最後のミノの後で、今の袋(7種1巡)に残っているミノ。空なら次は新しい袋(7種どれでも)。
     /// 袋の情報が無いときも空にしておく(7種どれでも来うるとみなす)。
     pub bag: Vec<Piece>,
+    /// 自分の攻撃ゲージ(REN 中にためている攻撃)
+    pub gauge: u32,
+    /// 相手の情報。無ければ相手を見ずに読む
+    pub opponent: Option<Opponent>,
 }
 
 impl Root {
@@ -124,6 +144,9 @@ pub struct SearchResult {
 /// 置いたミノが全部この高さ以上なら負け(可視20行より上で固定した)。
 const LOCK_OUT_Y: i8 = 20;
 
+/// 同じ局面をまとめるための鍵(盤面・HOLD・次のミノの位置・B2B・REN・予告の片付いた量・せり上がった量・届く攻撃)。
+type NodeKey = (Board, Option<Piece>, usize, bool, u32, u32, u32, u32);
+
 struct Node {
     state: PlayerState,
     hold: Option<Piece>,
@@ -141,6 +164,8 @@ struct Node {
     consumed: u32,
     /// 予告のうち、せり上がったとみなした行数。
     risen: u32,
+    /// 相手に届く攻撃(相殺に使った分を除く)の合計。
+    outgoing: u32,
 }
 
 /// 1手置いた後の予告の状態 (consumed, risen)。`depth` はこの手が何手目か(0 から)。
@@ -207,16 +232,21 @@ pub fn search(
         first: 0,
         consumed: 0,
         risen: 0,
+        outgoing: 0,
     }]];
     let incoming_total: u32 = root.incoming.iter().map(|g| g.lines).sum();
+    let battle = BattleContext {
+        opponent_danger: root.opponent.map(|o| o.board.max_height() + o.incoming),
+        opponent_threat: root.opponent.map_or(0, |o| opponent_threat(rules, &o.board, o.gauge, o.back_to_back)),
+        gauge: root.gauge,
+    };
     let mut nodes = 0u64;
     let mut moves = Vec::with_capacity(64);
 
     for depth in 0..depth_limit {
         let parents = &layers[depth];
         let mut children: Vec<Node> = Vec::new();
-        let mut seen: HashMap<(tetrisai_core::Board, Option<Piece>, usize, bool, u32, u32, u32), usize> =
-            HashMap::new();
+        let mut seen: HashMap<NodeKey, usize> = HashMap::new();
 
         for (pi, parent) in parents.iter().enumerate() {
             if cancelled() {
@@ -264,7 +294,12 @@ pub fn search(
                     );
                     let pending = incoming_total - consumed;
                     let garbage = Garbage { extra_height: risen + pending, pending };
-                    let score = r + evaluate(weights, &state.board, state.back_to_back, t_available, garbage);
+                    let cancelled_now = if result.lines > 0 { consumed - parent.consumed } else { 0 };
+                    let outgoing = parent.outgoing + result.attack - cancelled_now;
+                    let our_top = state.board.max_height() + risen + pending;
+                    let score = r
+                        + evaluate(weights, &state.board, state.back_to_back, t_available, garbage)
+                        + battle_value(weights, &battle, outgoing, our_top);
                     nodes += 1;
 
                     let first = if depth == 0 { u32::MAX } else { parent.first };
@@ -279,8 +314,10 @@ pub fn search(
                         first,
                         consumed,
                         risen,
+                        outgoing,
                     };
-                    let key = (state.board, hold, next, state.back_to_back, state.consecutive_clears, consumed, risen);
+                    let key =
+                        (state.board, hold, next, state.back_to_back, state.consecutive_clears, consumed, risen, outgoing);
                     match seen.get(&key) {
                         Some(&i) if children[i].score >= score => {}
                         Some(&i) => children[i] = child,
@@ -347,9 +384,13 @@ pub fn search(
                         );
                         let pending = incoming_total - consumed;
                         let garbage = Garbage { extra_height: risen + pending, pending };
+                        let cancelled_now = if result.lines > 0 { consumed - node.consumed } else { 0 };
+                        let outgoing = node.outgoing + result.attack - cancelled_now;
+                        let our_top = state.board.max_height() + risen + pending;
                         let s = node.reward
                             + reward(weights, rules, mv, &result)
-                            + evaluate(weights, &state.board, state.back_to_back, 1, garbage);
+                            + evaluate(weights, &state.board, state.back_to_back, 1, garbage)
+                            + battle_value(weights, &battle, outgoing, our_top);
                         nodes += 1;
                         best = best.max(s);
                     }

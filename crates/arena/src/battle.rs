@@ -161,7 +161,7 @@ impl Player {
     pub fn bag_state(&self, sequence: &mut PieceSequence) -> Vec<Piece> {
         let start = self.next_index;
         let end = start.div_ceil(7).max(1) * 7;
-        let end = if start % 7 == 0 { start + 7 } else { end };
+        let end = if start.is_multiple_of(7) { start + 7 } else { end };
         (start..end).map(|i| sequence.get(i)).collect()
     }
 
@@ -328,7 +328,7 @@ mod tests {
     fn player(board: Board, pieces: &[Piece]) -> (Player, PieceSequence) {
         let mut seq = PieceSequence::new(1);
         seq.pieces = pieces.to_vec();
-        seq.pieces.extend(std::iter::repeat(Piece::O).take(50));
+        seq.pieces.extend(std::iter::repeat_n(Piece::O, 50));
         let mut p = Player::new(&mut seq, 7);
         p.state.board = board;
         (p, seq)

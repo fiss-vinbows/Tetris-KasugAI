@@ -3,9 +3,19 @@
 use std::io;
 
 use tetrisai_core::{Piece, Placement, PlayerState, Rules};
-use tetrisai_engine::{search, IncomingGarbage, Root, SearchOptions, Weights};
+use tetrisai_engine::{search, IncomingGarbage, Opponent, Root, SearchOptions, Weights};
 
 use crate::battle::{Incoming, Player};
+
+/// 毎手、考える前に渡す対戦の状況。
+pub struct BattleView<'a> {
+    /// 自分への予告
+    pub incoming: &'a [Incoming],
+    /// 自分の攻撃ゲージ
+    pub gauge: u32,
+    /// 相手
+    pub opponent: &'a Player,
+}
 use crate::tbp::TbpBot;
 
 pub trait Agent {
@@ -13,8 +23,8 @@ pub trait Agent {
     fn start(&mut self, player: &Player, bag_state: &[Piece]) -> io::Result<()>;
     /// 前回の提案どおりに指したことと、新しく見えたミノを伝える。
     fn play(&mut self, placement: &Placement, new_pieces: &[Piece]) -> io::Result<()>;
-    /// 自分への予告を伝える(毎手、考える前に呼ぶ)。
-    fn update_incoming(&mut self, _incoming: &[Incoming]) -> io::Result<()> {
+    /// 対戦の状況(予告・攻撃ゲージ・相手)を伝える(毎手、考える前に呼ぶ)。
+    fn update_battle(&mut self, _view: &BattleView) -> io::Result<()> {
         Ok(())
     }
     /// 今の最善手。まだ無ければ None。
@@ -35,8 +45,8 @@ impl Agent for TbpBot {
     fn play(&mut self, placement: &Placement, new_pieces: &[Piece]) -> io::Result<()> {
         TbpBot::play(self, placement, new_pieces)
     }
-    fn update_incoming(&mut self, incoming: &[Incoming]) -> io::Result<()> {
-        TbpBot::incoming(self, incoming)
+    fn update_battle(&mut self, view: &BattleView) -> io::Result<()> {
+        TbpBot::battle(self, view)
     }
     fn suggest(&mut self) -> io::Result<Option<Placement>> {
         TbpBot::suggest(self)
@@ -61,6 +71,8 @@ pub struct EngineAgent {
     pub label: String,
     /// 予告を探索で考えるか(false なら予告を知らないものとして読む。比較実験用)
     pub use_incoming: bool,
+    /// 相手の情報を探索で考えるか(false なら相手を見ずに読む。比較実験用)
+    pub use_opponent: bool,
     /// 見えているミノの先を1手だけ予測して読むか
     pub speculate: bool,
     root: Option<Root>,
@@ -68,7 +80,16 @@ pub struct EngineAgent {
 
 impl EngineAgent {
     pub fn new(weights: Weights, rules: Rules, width: usize, label: &str) -> Self {
-        EngineAgent { weights, rules, width, label: label.to_string(), use_incoming: true, speculate: false, root: None }
+        EngineAgent {
+            weights,
+            rules,
+            width,
+            label: label.to_string(),
+            use_incoming: true,
+            use_opponent: true,
+            speculate: false,
+            root: None,
+        }
     }
 }
 
@@ -82,13 +103,25 @@ impl Agent for EngineAgent {
             queue: player.queue.iter().copied().collect(),
             incoming: Vec::new(),
             bag,
+            ..Default::default()
         });
         Ok(())
     }
 
-    fn update_incoming(&mut self, incoming: &[Incoming]) -> io::Result<()> {
-        if let (Some(root), true) = (self.root.as_mut(), self.use_incoming) {
-            root.incoming = incoming.iter().map(|g| IncomingGarbage { lines: g.lines, delay: g.delay }).collect();
+    fn update_battle(&mut self, view: &BattleView) -> io::Result<()> {
+        let Some(root) = self.root.as_mut() else { return Ok(()) };
+        if self.use_incoming {
+            root.incoming = view.incoming.iter().map(|g| IncomingGarbage { lines: g.lines, delay: g.delay }).collect();
+        }
+        if self.use_opponent {
+            root.gauge = view.gauge;
+            let o = view.opponent;
+            root.opponent = Some(Opponent {
+                board: o.state.board,
+                incoming: o.incoming_lines(),
+                gauge: o.gauge,
+                back_to_back: o.state.back_to_back,
+            });
         }
         Ok(())
     }

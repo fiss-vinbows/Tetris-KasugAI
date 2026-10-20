@@ -12,6 +12,10 @@
 //! 独自の拡張: `incoming` メッセージ(`{"type": "incoming", "garbage": [{"lines": 4, "delay": 1}, ...]}`)で
 //! 自分への予告を受け取る。`start` にも同じ形の `incoming` を付けられる。Cold Clear 2 は知らないメッセージを
 //! 無視するので、送る側は両方に同じものを送ってよい。
+//! 独自の拡張: `battle` メッセージで、予告に加えて自分の攻撃ゲージと相手の情報を受け取る:
+//! `{"type": "battle", "incoming": [{"lines": 4, "delay": 1}], "gauge": 0,
+//!   "opponent": {"board": [[null, "G", ...], ...], "incoming": 2, "gauge": 0, "back_to_back": false}}`
+//! (`board` は `start` と同じ形。`opponent` が無ければ相手を見ずに読む)
 //!
 //! 起動引数:
 //! - `--config <ファイル>`: 評価の重み。`.json` は Cold Clear 2 の設定(`freestyle_weights`)、
@@ -28,7 +32,7 @@ use std::time::Instant;
 
 use serde_json::{json, Value};
 use tetrisai_core::{Board, Piece, Placement, PlayerState, Rules};
-use tetrisai_engine::{search, IncomingGarbage, Root, SearchOptions, SearchResult, Weights};
+use tetrisai_engine::{search, IncomingGarbage, Opponent, Root, SearchOptions, SearchResult, Weights};
 
 const PLAN_LEN: usize = 5;
 const MAX_CANDIDATES: usize = 5;
@@ -90,7 +94,7 @@ fn main() {
     };
     send(json!({
         "type": "info",
-        "name": "TetrisAI",
+        "name": "Kasugai",
         "version": env!("CARGO_PKG_VERSION"),
         "author": "fiss-vinbows",
         "features": [],
@@ -150,6 +154,15 @@ fn main() {
                 if let Some(root) = s.root.as_mut() {
                     root.incoming = parse_incoming(&msg["garbage"]);
                     // それまでの最善手は同じ盤面のものなので残しておく(新しい探索で置き換わる)
+                    bot.bump(&mut s);
+                }
+            }
+            "battle" => {
+                let mut s = bot.shared.lock().unwrap();
+                if let Some(root) = s.root.as_mut() {
+                    root.incoming = parse_incoming(&msg["incoming"]);
+                    root.gauge = msg["gauge"].as_u64().unwrap_or(0) as u32;
+                    root.opponent = parse_opponent(&msg["opponent"]);
                     bot.bump(&mut s);
                 }
             }
@@ -233,9 +246,10 @@ fn parse_piece(s: &str) -> Option<Piece> {
 }
 
 /// TBP の `start` を局面にする。盤面は y=0(最下段)から順の行の配列。
-fn parse_start(msg: &Value) -> Option<Root> {
+/// TBP の盤面(y=0(最下段)から順の行の配列)を読む。
+fn parse_board(v: &Value) -> Option<Board> {
     let mut board = Board::new();
-    for (y, row) in msg["board"].as_array()?.iter().enumerate().take(tetrisai_core::board::HEIGHT) {
+    for (y, row) in v.as_array()?.iter().enumerate().take(tetrisai_core::board::HEIGHT) {
         for (x, cell) in row.as_array()?.iter().enumerate().take(tetrisai_core::board::WIDTH) {
             if !cell.is_null() {
                 board.cols[x] |= 1 << y;
@@ -244,6 +258,21 @@ fn parse_start(msg: &Value) -> Option<Root> {
     }
     // ライン消去の演出中に読み取った盤面などで、そろった行が残っていることがある
     board.clear_full_lines();
+    Some(board)
+}
+
+/// `battle` の `opponent` を読む。無ければ None。
+fn parse_opponent(v: &Value) -> Option<Opponent> {
+    Some(Opponent {
+        board: parse_board(&v["board"])?,
+        incoming: v["incoming"].as_u64().unwrap_or(0) as u32,
+        gauge: v["gauge"].as_u64().unwrap_or(0) as u32,
+        back_to_back: v["back_to_back"].as_bool().unwrap_or(false),
+    })
+}
+
+fn parse_start(msg: &Value) -> Option<Root> {
+    let board = parse_board(&msg["board"])?;
     let queue = msg["queue"].as_array()?.iter().map(|p| p.as_str().and_then(parse_piece)).collect::<Option<Vec<_>>>()?;
     let hold = match &msg["hold"] {
         Value::Null => None,
@@ -257,7 +286,7 @@ fn parse_start(msg: &Value) -> Option<Root> {
         .as_array()
         .map(|a| a.iter().filter_map(|p| p.as_str().and_then(parse_piece)).collect())
         .unwrap_or_default();
-    Some(Root { state, hold, queue, incoming: parse_incoming(&msg["incoming"]), bag })
+    Some(Root { state, hold, queue, incoming: parse_incoming(&msg["incoming"]), bag, ..Default::default() })
 }
 
 /// 予告の配列(`[{"lines": 4, "delay": 1}, ...]`)を読む。無い・読めない要素は無視する。
@@ -319,6 +348,16 @@ mod tests {
         assert_eq!(root.hold, Some(Piece::O));
         assert_eq!(root.state.consecutive_clears, 2);
         assert!(root.state.back_to_back);
+    }
+
+    #[test]
+    fn battleの相手の情報を読める() {
+        let mut rows = vec![vec![Value::Null; 10]; 40];
+        rows[0][3] = json!("G");
+        let opp = parse_opponent(&json!({"board": rows, "incoming": 2, "gauge": 3, "back_to_back": true})).unwrap();
+        assert!(opp.board.occupied((3, 0)));
+        assert_eq!((opp.incoming, opp.gauge, opp.back_to_back), (2, 3, true));
+        assert!(parse_opponent(&Value::Null).is_none());
     }
 
     #[test]

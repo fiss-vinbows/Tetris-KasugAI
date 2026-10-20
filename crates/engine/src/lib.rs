@@ -3,5 +3,5 @@
 pub mod eval;
 pub mod search;
 
-pub use eval::{Garbage, Weights};
-pub use search::{search, Candidate, IncomingGarbage, Root, SearchOptions, SearchResult};
+pub use eval::{BattleContext, Garbage, Weights};
+pub use search::{search, Candidate, IncomingGarbage, Opponent, Root, SearchOptions, SearchResult};

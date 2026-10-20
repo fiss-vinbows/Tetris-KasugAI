@@ -58,6 +58,27 @@ pub struct Weights {
     pub pending_garbage: f32,
     /// 予告をすべて受けたときに20段を超える分(1段あたり)
     pub overflow: f32,
+
+    // ---- 対戦の駆け引き(M4。相手の情報があるときだけ効く。`attack_sent` は常に効く) ----
+    /// 相手に届く攻撃(相殺に使った分を除く)1行あたり
+    pub attack_sent: f32,
+    /// 相手に届く攻撃1行あたり × 相手の危なさ(相手の高さ + 相手への予告、20段で1)
+    pub attack_sent_danger: f32,
+    /// 届く攻撃(攻撃ゲージを含む)が相手の残りの余裕(20段 − 相手の危なさ)以上になる(とどめ)
+    pub lethal: f32,
+    /// 自分の高さ(予告を含む)+ 相手が次に撃てる攻撃の見積もり が20段を超える分(1段あたり)
+    pub threat_overflow: f32,
+}
+
+/// 相手の情報から作る、評価に使う値(探索の最初に1回だけ計算する)。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BattleContext {
+    /// 相手の危なさ(相手の盤面の高さ + 相手への予告の行数)。相手の情報が無ければ None
+    pub opponent_danger: Option<u32>,
+    /// 相手が次に撃てる攻撃の見積もり(行数)
+    pub opponent_threat: u32,
+    /// 自分の攻撃ゲージ(REN 中にためている攻撃。次にラインを消さない手を置くと相手へ送られる)
+    pub gauge: u32,
 }
 
 /// 予告の影響(探索の中で計算する)。
@@ -95,6 +116,10 @@ impl Default for Weights {
             mid_air_stop: -1.5,
             pending_garbage: -0.1,
             overflow: -10.0,
+            attack_sent: 0.0,
+            attack_sent_danger: 0.5,
+            lethal: 20.0,
+            threat_overflow: -2.0,
         }
     }
 }
@@ -197,6 +222,47 @@ pub fn evaluate(w: &Weights, board: &Board, back_to_back: bool, t_available: usi
     e
 }
 
+/// 対戦の駆け引きの評価。`outgoing` はこの局面までに相手に届く攻撃(相殺に使った分を除く)、
+/// `our_top` は自分の盤面の高さ(予告の分を上乗せしたもの)。
+pub fn battle_value(w: &Weights, ctx: &BattleContext, outgoing: u32, our_top: u32) -> f32 {
+    let mut v = w.attack_sent * outgoing as f32;
+    if let Some(danger) = ctx.opponent_danger {
+        v += w.attack_sent_danger * outgoing as f32 * (danger as f32 / 20.0);
+        let margin = 20u32.saturating_sub(danger);
+        if outgoing > 0 && ctx.gauge + outgoing >= margin {
+            v += w.lethal;
+        }
+        let threat_top = our_top + ctx.opponent_threat;
+        if threat_top > 20 {
+            v += w.threat_overflow * (threat_top - 20) as f32;
+        }
+    }
+    v
+}
+
+/// 相手が次に撃てる攻撃の見積もり(行数)。相手の盤面の T溝(TSS/TSD/TST)とテトリスの井戸のうち
+/// 大きいほうに、相手の攻撃ゲージと B2B の加算を足す。
+pub fn opponent_threat(rules: &Rules, board: &Board, gauge: u32, back_to_back: bool) -> u32 {
+    let mut best = 0;
+    if let Some(loc) = tslot_left(board).or_else(|| tslot_right(board)) {
+        let mut filled = *board;
+        filled.place(&loc);
+        let lines = filled.full_lines().count_ones();
+        best = best.max(rules.line_attack(lines, Spin::Full));
+    }
+    // テトリスの井戸: 一番低い列以外がそろっている深さが4以上
+    let (well_x, well_h) = (0..WIDTH).map(|x| (x, board.column_height(x))).min_by_key(|&(_, h)| h).unwrap();
+    let full_except_well =
+        board.cols.iter().enumerate().filter(|&(x, _)| x != well_x).fold(!0u64, |acc, (_, &c)| acc & c);
+    if (full_except_well >> well_h).trailing_ones() >= 4 {
+        best = best.max(rules.line_attack(4, Spin::None));
+    }
+    if best > 0 && back_to_back {
+        best += rules.attack.back_to_back_bonus;
+    }
+    best + gauge
+}
+
 /// 左側に屋根がある T溝(CC2 の well_known_tslot_left と同じ)。
 fn tslot_left(board: &Board) -> Option<PieceLocation> {
     for x in 0..WIDTH - 2 {
@@ -256,6 +322,33 @@ mod tests {
         let with = evaluate(&w, &board, false, 1, Garbage::default());
         let without = evaluate(&w, &board, false, 0, Garbage::default());
         assert!((with - without - w.tslot[2]).abs() < 1e-5, "TSD の溝は tslot[2] の点");
+    }
+
+    #[test]
+    fn 相手の攻撃の準備を見積もる() {
+        let rules = Rules::ppt2();
+        // TSD の溝がある盤面
+        let tsd = Board::from_rows(&["##........", "#...######", "##.#######"]);
+        assert_eq!(opponent_threat(&rules, &tsd, 0, false), 4);
+        assert_eq!(opponent_threat(&rules, &tsd, 0, true), 5, "B2B なら +1");
+        assert_eq!(opponent_threat(&rules, &tsd, 3, false), 7, "ゲージの分を足す");
+        // 4段そろった井戸(テトリス)
+        let well = Board::from_rows(&["#########."; 4]);
+        assert_eq!(opponent_threat(&rules, &well, 0, false), 4);
+        assert_eq!(opponent_threat(&rules, &Board::new(), 0, false), 0);
+    }
+
+    #[test]
+    fn とどめと相手の危なさ() {
+        let w = Weights::default();
+        // 相手は17段(余裕3段)。4行届けばとどめ、2行では足りない
+        let ctx = BattleContext { opponent_danger: Some(17), opponent_threat: 0, gauge: 0 };
+        let lethal = battle_value(&w, &ctx, 4, 5);
+        let not = battle_value(&w, &ctx, 2, 5);
+        assert!(lethal - not > w.lethal * 0.9, "{lethal} {not}");
+        // 相手の情報が無ければ、届く攻撃の点(既定 0)だけ
+        let none = BattleContext::default();
+        assert_eq!(battle_value(&w, &none, 4, 5), 0.0);
     }
 
     #[test]

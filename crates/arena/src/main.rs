@@ -15,6 +15,7 @@
 //!                       このAIの探索を直接呼ぶ。思考時間ではなく幅(--width)を固定する
 //!   --width <数>        --a-weights / --b-weights の探索の幅(既定 128)
 //!   --a-no-incoming / --b-no-incoming  --a-weights / --b-weights の側に予告を教えない(比較実験用)
+//!   --a-no-opponent / --b-no-opponent  --a-weights / --b-weights の側に相手の情報を教えない(比較実験用)
 //!   --a-speculate / --b-speculate      --a-weights / --b-weights の側で、見えているミノの先を予測して読む
 //!   --record <file>     1局ごとの結果を JSON Lines で書き出す
 //!   --adjudicate        手数の上限に達したら危なさ(高さ + 予告)の小さいほうを勝ちにする(同じAI同士の比較用)
@@ -38,16 +39,17 @@ enum Engine {
     /// TBP の bot プロセス
     Tbp { exe: PathBuf, args: Vec<String> },
     /// このAIの探索を直接呼ぶ
-    InProcess { weights: Weights, label: String, width: usize, use_incoming: bool, speculate: bool },
+    InProcess { weights: Weights, label: String, width: usize, use_incoming: bool, use_opponent: bool, speculate: bool },
 }
 
 impl Engine {
     fn create(&self, rules: &Rules) -> Box<dyn Agent + Send> {
         match self {
             Engine::Tbp { exe, args } => Box::new(TbpBot::spawn(exe, args).expect("bot を起動できない")),
-            Engine::InProcess { weights, label, width, use_incoming, speculate } => {
+            Engine::InProcess { weights, label, width, use_incoming, use_opponent, speculate } => {
                 let mut agent = EngineAgent::new(weights.clone(), rules.clone(), *width, label);
                 agent.use_incoming = *use_incoming;
+                agent.use_opponent = *use_opponent;
                 agent.speculate = *speculate;
                 Box::new(agent)
             }
@@ -78,14 +80,18 @@ fn main() {
             let use_incoming = !args.iter().any(|a| *a == format!("--{side}-no-incoming"));
             let stem = Path::new(&path).file_stem().map_or(path.clone(), |s| s.to_string_lossy().into_owned());
             let speculate = args.iter().any(|a| *a == format!("--{side}-speculate"));
+            let use_opponent = !args.iter().any(|a| *a == format!("--{side}-no-opponent"));
             let mut label = stem;
             if !use_incoming {
                 label += "(予告なし)";
             }
+            if !use_opponent {
+                label += "(相手なし)";
+            }
             if speculate {
                 label += "(予測)";
             }
-            Engine::InProcess { weights: load_weights(&path), label, width, use_incoming, speculate }
+            Engine::InProcess { weights: load_weights(&path), label, width, use_incoming, use_opponent, speculate }
         }
         None => {
             let exe = get(&format!("--{side}")).map(PathBuf::from).unwrap_or(default);

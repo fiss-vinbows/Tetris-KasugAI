@@ -7,7 +7,15 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use serde_json::{json, Value};
 use tetrisai_core::{Piece, Placement};
 
-use crate::battle::{Incoming, Player};
+use crate::agent::BattleView;
+use crate::battle::Player;
+
+/// 盤面を TBP の形(y=0(最下段)から順の行の配列。埋まりは "G")にする。
+fn board_rows(board: &tetrisai_core::Board) -> Vec<Vec<Option<&'static str>>> {
+    (0..tetrisai_core::board::HEIGHT as i8)
+        .map(|y| (0..tetrisai_core::board::WIDTH as i8).map(|x| board.occupied((x, y)).then_some("G")).collect())
+        .collect()
+}
 
 pub struct TbpBot {
     child: Child,
@@ -55,9 +63,7 @@ impl TbpBot {
     /// `bag_state` は NEXT の後に今の袋に残っているミノ。これを渡すと Cold Clear 2 は
     /// 見えていない NEXT を予測して読む(渡さないと予測しない)。
     pub fn start(&mut self, p: &Player, bag_state: &[Piece]) -> io::Result<()> {
-        let board: Vec<Vec<Option<&str>>> = (0..tetrisai_core::board::HEIGHT as i8)
-            .map(|y| (0..tetrisai_core::board::WIDTH as i8).map(|x| p.state.board.occupied((x, y)).then_some("G")).collect())
-            .collect();
+        let board = board_rows(&p.state.board);
         let queue: Vec<String> = p.queue.iter().map(|q| q.to_char().to_string()).collect();
         self.send(&json!({
             "type": "start",
@@ -82,10 +88,21 @@ impl TbpBot {
         Ok(())
     }
 
-    /// 自分への予告を伝える(このAIの独自の拡張。Cold Clear 2 は知らないメッセージとして無視する)。
-    pub fn incoming(&mut self, incoming: &[Incoming]) -> io::Result<()> {
-        let garbage: Vec<Value> = incoming.iter().map(|g| json!({"lines": g.lines, "delay": g.delay})).collect();
-        self.send(&json!({"type": "incoming", "garbage": garbage}))
+    /// 対戦の状況(予告・攻撃ゲージ・相手)を伝える(このAIの独自の拡張。Cold Clear 2 は知らないメッセージとして無視する)。
+    pub fn battle(&mut self, view: &BattleView) -> io::Result<()> {
+        let incoming: Vec<Value> = view.incoming.iter().map(|g| json!({"lines": g.lines, "delay": g.delay})).collect();
+        let o = view.opponent;
+        self.send(&json!({
+            "type": "battle",
+            "incoming": incoming,
+            "gauge": view.gauge,
+            "opponent": {
+                "board": board_rows(&o.state.board),
+                "incoming": o.incoming_lines(),
+                "gauge": o.gauge,
+                "back_to_back": o.state.back_to_back,
+            },
+        }))
     }
 
     /// 今の最善手を聞く。まだ無ければ None。

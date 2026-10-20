@@ -36,7 +36,7 @@ use tetrisai_core::Rules;
 use tetrisai_engine::Weights;
 
 /// 調整する重みの名前(Weights のフィールド。配列は [添字])。
-const NAMES: [&str; 27] = [
+const NAMES: [&str; 31] = [
     "cell_coveredness",
     "holes",
     "row_transitions",
@@ -64,6 +64,10 @@ const NAMES: [&str; 27] = [
     "perfect_clear",
     "pending_garbage",
     "overflow",
+    "attack_sent",
+    "attack_sent_danger",
+    "lethal",
+    "threat_overflow",
 ];
 
 fn get_params(w: &Weights) -> Vec<f64> {
@@ -95,6 +99,10 @@ fn get_params(w: &Weights) -> Vec<f64> {
         w.perfect_clear,
         w.pending_garbage,
         w.overflow,
+        w.attack_sent,
+        w.attack_sent_danger,
+        w.lethal,
+        w.threat_overflow,
     ];
     v.iter().map(|&x| x as f64).collect()
 }
@@ -119,6 +127,10 @@ fn set_params(w: &mut Weights, v: &[f64]) {
     w.perfect_clear = f(24);
     w.pending_garbage = f(25);
     w.overflow = f(26);
+    w.attack_sent = f(27);
+    w.attack_sent_danger = f(28);
+    w.lethal = f(29);
+    w.threat_overflow = f(30);
 }
 
 /// 学習率とずらし幅の減り方(反復回数 k に対して)
@@ -205,7 +217,7 @@ fn main() {
                         break;
                     }
                     let seed = first_seed + (g / 2) as u64;
-                    let plus_first = g % 2 == 0;
+                    let plus_first = g.is_multiple_of(2);
                     let mut p = EngineAgent::new(plus.clone(), rules.clone(), width, "+");
                     let mut m = EngineAgent::new(minus.clone(), rules.clone(), width, "-");
                     let result = if plus_first {
@@ -264,7 +276,7 @@ fn save(out: &Path, k: usize, theta: &[f64], base: &Weights) {
     set_params(&mut w, theta);
     let text = toml::to_string(&w).unwrap();
     fs::write(out.join("latest.toml"), &text).unwrap();
-    if k % 100 == 0 {
+    if k.is_multiple_of(100) {
         fs::write(out.join(format!("weights_k{k:05}.toml")), &text).unwrap();
     }
 }

@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use tetrisai_core::{Piece, Placement, Rules};
 
-use crate::agent::Agent;
+use crate::agent::{Agent, BattleView};
 use crate::battle::{Loss, PieceSequence, Player, Stats};
 
 #[derive(Clone, Debug)]
@@ -63,7 +63,8 @@ pub fn play_game(bots: [&mut dyn Agent; 2], seed: u64, config: &GameConfig) -> i
                 bots[i].play(placement, new_pieces)?;
             }
             let incoming: Vec<_> = players[i].incoming.iter().copied().collect();
-            bots[i].update_incoming(&incoming)?;
+            let view = BattleView { incoming: &incoming, gauge: players[i].gauge, opponent: &players[1 - i] };
+            bots[i].update_battle(&view)?;
         }
         if bots.iter().any(|b| b.thinks_in_background()) {
             sleep(config.think);
