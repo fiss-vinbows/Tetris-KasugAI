@@ -228,6 +228,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tetrisai-core",
+ "toml",
 ]
 
 [[package]]
