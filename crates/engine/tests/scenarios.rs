@@ -127,3 +127,66 @@ fn 相手の情報が無ければすぐ撃って相殺する() {
         assert_eq!(first_lines, 2, "{name}: すぐ TSD で相殺していない: {clears:?}");
     }
 }
+
+// ---------------- M5: 中あけ積み・空中TSD・中盤のパフェ(試験用の重み) ----------------
+
+fn experimental_weights() -> Weights {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/weights/experimental_m5.toml");
+    toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+fn run_plan(root: &Root, weights: &Weights) -> (Vec<(Piece, Spin, u32)>, PlayerState) {
+    let options = SearchOptions { width: 256, max_depth: 6, speculate: false };
+    let r = search(root, &options, weights, &Rules::ppt2(), &|| false).unwrap();
+    let rules = Rules::ppt2();
+    let mut state = root.state;
+    let steps = r
+        .plan
+        .iter()
+        .map(|m| {
+            let res = state.apply(&m.placement, &rules);
+            (m.placement.location.piece, res.spin, res.lines)
+        })
+        .collect();
+    (steps, state)
+}
+
+/// input/practice_20261019_214345_5397d0.png: 中あけの上で空中TSD を撃ち、その後は左右を積み込んで中あけを保つ。
+#[test]
+fn 試験用の重みは空中tsdを撃って中あけを保つ() {
+    let board = Board::from_rows(&["..#....##.", ".##....###", "##...#####", "###.######", "###....###", "###....###"]);
+    let root = Root {
+        state: PlayerState::new(board),
+        hold: Some(Piece::J),
+        queue: vec![Piece::T, Piece::O, Piece::L, Piece::Z, Piece::S, Piece::I],
+        ..Default::default()
+    };
+    let (steps, end) = run_plan(&root, &experimental_weights());
+    assert_eq!(steps[0], (Piece::T, Spin::Full, 2), "1手目で空中TSD: {steps:?}");
+    assert!(tetrisai_engine::shape::center_well_rows(&end.board) >= 2, "中あけが残っていない: {steps:?}");
+}
+
+/// 盤面が低い(5段以下)ので中あけ積みを始め、中央を埋めずに左右を積み上げる。
+#[test]
+fn 試験用の重みは低い盤面で中あけを積む() {
+    let root = Root {
+        state: PlayerState::new(Board::from_rows(&["###....###", "###....###"])),
+        queue: vec![Piece::L, Piece::J, Piece::O, Piece::S, Piece::Z, Piece::T],
+        ..Default::default()
+    };
+    let (steps, end) = run_plan(&root, &experimental_weights());
+    assert!(tetrisai_engine::shape::center_well_rows(&end.board) >= 2, "中あけを埋めた: {steps:?}");
+    assert!(steps.iter().all(|&(_, _, lines)| lines == 0), "消さずに積み込む: {steps:?}");
+}
+
+/// 埋まりマスが偶数で低い盤面では、見えているミノでパフェを取る。
+#[test]
+fn 試験用の重みは低い偶数の盤面でパフェを取る() {
+    let root = Root {
+        state: PlayerState::new(Board::from_rows(&["#####.....", "#####....."])),
+        queue: vec![Piece::T, Piece::I, Piece::O, Piece::L, Piece::J, Piece::S],
+        ..Default::default()
+    };
+    let (steps, end) = run_plan(&root, &experimental_weights());
+    assert!(end.board.is_empty(), "パフェを取っていない: {steps:?}");
+}

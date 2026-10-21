@@ -22,7 +22,9 @@
 
 use std::collections::HashMap;
 
-use crate::eval::{battle_value, evaluate, opponent_threat, reward, BattleContext, Garbage, Weights};
+use crate::eval::{
+    battle_value, center_well_mode, evaluate, opponent_threat, reward, BattleContext, EvalContext, Garbage, Weights,
+};
 use tetrisai_core::{generate_into, Board, ClearResult, Move, Piece, Placement, PlayerState, Rules};
 
 /// 予告の1件(相手の1回の攻撃)。
@@ -240,6 +242,7 @@ pub fn search(
         opponent_threat: root.opponent.map_or(0, |o| opponent_threat(rules, &o.board, o.gauge, o.back_to_back)),
         gauge: root.gauge,
     };
+    let center_well = center_well_mode(weights, &root.state.board);
     let mut nodes = 0u64;
     let mut moves = Vec::with_capacity(64);
 
@@ -297,8 +300,9 @@ pub fn search(
                     let cancelled_now = if result.lines > 0 { consumed - parent.consumed } else { 0 };
                     let outgoing = parent.outgoing + result.attack - cancelled_now;
                     let our_top = state.board.max_height() + risen + pending;
+                    let ctx = EvalContext { t_available, garbage, center_well };
                     let score = r
-                        + evaluate(weights, &state.board, state.back_to_back, t_available, garbage)
+                        + evaluate(weights, &state.board, state.back_to_back, &ctx)
                         + battle_value(weights, &battle, outgoing, our_top);
                     nodes += 1;
 
@@ -387,9 +391,10 @@ pub fn search(
                         let cancelled_now = if result.lines > 0 { consumed - node.consumed } else { 0 };
                         let outgoing = node.outgoing + result.attack - cancelled_now;
                         let our_top = state.board.max_height() + risen + pending;
+                        let ctx = EvalContext { t_available: 1, garbage, center_well };
                         let s = node.reward
                             + reward(weights, rules, mv, &result)
-                            + evaluate(weights, &state.board, state.back_to_back, 1, garbage)
+                            + evaluate(weights, &state.board, state.back_to_back, &ctx)
                             + battle_value(weights, &battle, outgoing, our_top);
                         nodes += 1;
                         best = best.max(s);

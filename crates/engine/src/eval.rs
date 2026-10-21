@@ -10,6 +10,8 @@
 
 use serde::{Deserialize, Serialize};
 use tetrisai_core::board::WIDTH;
+
+use crate::shape;
 use tetrisai_core::{Board, ClearResult, Move, Piece, PieceLocation, Rotation, Rules, Spin};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -68,6 +70,33 @@ pub struct Weights {
     pub lethal: f32,
     /// 自分の高さ(予告を含む)+ 相手が次に撃てる攻撃の見積もり が20段を超える分(1段あたり)
     pub threat_overflow: f32,
+
+    // ---- 中盤の作戦(M5。既定値はすべて0で効かない。試験用の重みは config/weights/experimental_m5.toml) ----
+    /// 中あけの行(左右3列ずつが埋まり中央4列が空いた行)1行あたり。中あけ積みのときだけ効く
+    pub center_well_rows: f32,
+    /// 中あけの左右の高さの差1段あたり。中あけ積みのときだけ効く
+    pub center_well_side_diff: f32,
+    /// 中あけの上(空中)に TSD の溝がある。中あけ積みのときだけ効く
+    pub air_tsd_slot: f32,
+    /// 中あけ積みを始める高さ(探索の出発点の盤面がこの段数以下か、すでに中あけが2行以上あれば中あけ積み)
+    pub center_well_start_height: f32,
+    /// TSD の溝(空中のものを含む、一般的な形)1つあたり(2つまで)。`tslot` は CC2 と同じ単純な形しか見ない
+    pub tsd_slot_any: f32,
+    /// 中盤のパフェの見込みがある形(埋まりマスが偶数・穴なし・4段以内でそろえられる)
+    pub pc_chance: f32,
+    /// ソフトドロップで落とした段数1段あたり(低い盤面での Tスピンは落とす時間が長く効率が悪い)
+    pub soft_drop_rows: f32,
+}
+
+/// 盤面の評価に渡す、局面ごとの値。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct EvalContext {
+    /// 今後使える T の目安(T溝の評価を何回まで重ねるか)
+    pub t_available: usize,
+    /// 予告の影響(高さに上乗せする)
+    pub garbage: Garbage,
+    /// 中あけ積みの作戦をとっているか
+    pub center_well: bool,
 }
 
 /// 相手の情報から作る、評価に使う値(探索の最初に1回だけ計算する)。
@@ -120,6 +149,13 @@ impl Default for Weights {
             attack_sent_danger: 0.5,
             lethal: 20.0,
             threat_overflow: -2.0,
+            center_well_rows: 0.0,
+            center_well_side_diff: 0.0,
+            air_tsd_slot: 0.0,
+            center_well_start_height: 5.0,
+            tsd_slot_any: 0.0,
+            pc_chance: 0.0,
+            soft_drop_rows: 0.0,
         }
     }
 }
@@ -149,15 +185,39 @@ pub fn reward(w: &Weights, rules: &Rules, mv: &Move, result: &ClearResult) -> f3
     }
     r += w.soft_drop_section * mv.soft_drop_sections as f32;
     r += w.mid_air_stop * mv.mid_air_stops as f32;
+    if mv.soft_drop_sections > 0 {
+        // ソフトドロップで落とした段数の目安: 出現位置の高さから置いた位置まで
+        let rows = (rules.spawn().y - mv.placement.location.y).max(0);
+        r += w.soft_drop_rows * rows as f32;
+    }
     r
 }
 
-/// 盤面の評価。`t_available` は今後使える T の目安(T溝の評価を何回まで重ねるか)。
-/// `garbage` は予告の影響(高さに上乗せする)。
-pub fn evaluate(w: &Weights, board: &Board, back_to_back: bool, t_available: usize, garbage: Garbage) -> f32 {
+/// 中あけ積みの作戦をとるか(探索の出発点の盤面で1回だけ決める)。中あけの重みが0なら、とらない。
+pub fn center_well_mode(w: &Weights, board: &Board) -> bool {
+    w.center_well_rows != 0.0
+        && (board.max_height() as f32 <= w.center_well_start_height || shape::center_well_rows(board) >= 2)
+}
+
+/// 盤面の評価。
+pub fn evaluate(w: &Weights, board: &Board, back_to_back: bool, ctx: &EvalContext) -> f32 {
+    let (t_available, garbage) = (ctx.t_available, ctx.garbage);
     let mut e = 0.0;
     if back_to_back {
         e += w.has_back_to_back;
+    }
+
+    // 中盤の作戦(M5)
+    if w.tsd_slot_any != 0.0 {
+        e += w.tsd_slot_any * shape::tsd_slots(board).len().min(2) as f32;
+    }
+    if ctx.center_well {
+        e += w.center_well_rows * shape::center_well_rows(board) as f32;
+        e += w.center_well_side_diff * shape::center_well_side_diff(board) as f32;
+        e += w.air_tsd_slot * shape::has_air_tsd(board).min(1) as f32;
+    }
+    if w.pc_chance != 0.0 && shape::pc_possible(board) {
+        e += w.pc_chance;
     }
 
     // T溝: 見つかった溝に T を入れたと仮定し、消える行数で点を付ける(2行以上消えるなら消して次を探す)
@@ -304,8 +364,8 @@ mod tests {
         let w = Weights::default();
         let flat = Board::from_rows(&["#########."]);
         let hole = Board::from_rows(&["#########.", "####.#####"]);
-        let g = Garbage::default();
-        assert!(evaluate(&w, &hole, false, 1, g) < evaluate(&w, &flat, false, 1, g));
+        let ctx = EvalContext { t_available: 1, ..Default::default() };
+        assert!(evaluate(&w, &hole, false, &ctx) < evaluate(&w, &flat, false, &ctx));
     }
 
     #[test]
@@ -319,8 +379,8 @@ mod tests {
         let loc = tslot_left(&board).or_else(|| tslot_right(&board));
         assert!(loc.is_some());
         let w = Weights::default();
-        let with = evaluate(&w, &board, false, 1, Garbage::default());
-        let without = evaluate(&w, &board, false, 0, Garbage::default());
+        let with = evaluate(&w, &board, false, &EvalContext { t_available: 1, ..Default::default() });
+        let without = evaluate(&w, &board, false, &EvalContext::default());
         assert!((with - without - w.tslot[2]).abs() < 1e-5, "TSD の溝は tslot[2] の点");
     }
 
@@ -349,6 +409,57 @@ mod tests {
         // 相手の情報が無ければ、届く攻撃の点(既定 0)だけ
         let none = BattleContext::default();
         assert_eq!(battle_value(&w, &none, 4, 5), 0.0);
+    }
+
+    #[test]
+    fn 新しい作戦の重みは既定では効かない() {
+        // 中あけ・空中TSD・パフェの見込みがそろった盤面でも、既定の重みでは中あけ積みにならず点も変わらない
+        let w = Weights::default();
+        let board = Board::from_rows(&["##........", "###....###", "###....###"]);
+        assert!(!center_well_mode(&w, &board));
+        let off = EvalContext { t_available: 1, ..Default::default() };
+        let on = EvalContext { center_well: true, ..off };
+        assert_eq!(evaluate(&w, &board, false, &off), evaluate(&w, &board, false, &on));
+    }
+
+    #[test]
+    fn 中あけ積みの評価() {
+        let w = Weights { center_well_rows: 1.0, center_well_side_diff: -0.5, ..Weights::default() };
+        let well = Board::from_rows(&["###....###", "###....###"]);
+        assert!(center_well_mode(&w, &well));
+        let ctx = EvalContext { t_available: 1, center_well: true, ..Default::default() };
+        let base = evaluate(&Weights::default(), &well, false, &ctx);
+        assert!((evaluate(&w, &well, false, &ctx) - base - 2.0).abs() < 1e-4, "中あけ2行で +2");
+        // 高い盤面で中あけが無ければ、中あけ積みの作戦はとらない
+        assert!(!center_well_mode(&w, &Board::from_rows(&["#########."; 8])));
+    }
+
+    #[test]
+    fn パフェの見込みの加点() {
+        let w = Weights { pc_chance: 3.0, ..Weights::default() };
+        let even = Board::from_rows(&["########.."]);
+        let odd = Board::from_rows(&["#########."]);
+        let ctx = EvalContext::default();
+        let gain = |b: &Board| evaluate(&w, b, false, &ctx) - evaluate(&Weights::default(), b, false, &ctx);
+        assert!((gain(&even) - 3.0).abs() < 1e-4);
+        assert_eq!(gain(&odd), 0.0, "奇数は考えない");
+    }
+
+    #[test]
+    fn 低い盤面のソフトドロップほど減点が大きい() {
+        use tetrisai_core::{Placement, Rotation};
+        let w = Weights { soft_drop_rows: -0.1, ..Weights::default() };
+        let rules = Rules::ppt2();
+        let mv = |y: i8| Move {
+            placement: Placement { location: PieceLocation::new(Piece::T, Rotation::South, 4, y), spin: Spin::Full },
+            mid_air_stops: 0,
+            soft_drop_sections: 1,
+            inputs: 2,
+        };
+        let result = ClearResult { lines: 2, spin: Spin::Full, ..Default::default() };
+        let low = reward(&w, &rules, &mv(1), &result);
+        let high = reward(&w, &rules, &mv(11), &result);
+        assert!((high - low - 1.0).abs() < 1e-4, "10段の差で 0.1 × 10 = 1.0 の差: {low} {high}");
     }
 
     #[test]
