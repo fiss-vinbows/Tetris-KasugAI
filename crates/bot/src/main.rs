@@ -94,7 +94,7 @@ fn main() {
     };
     send(json!({
         "type": "info",
-        "name": "Kasugai",
+        "name": "KasugAI",
         "version": env!("CARGO_PKG_VERSION"),
         "author": "fiss-vinbows",
         "features": [],

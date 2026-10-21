@@ -1,7 +1,7 @@
 # KasugAI(鎹)
 
 TBA(Tetris Beginner Assistance、`../Tetris`)の思考エンジン Cold Clear 2 を置き換えるための自作のテトリスAI。
-リポジトリ: https://github.com/fiss-vinbows/Tetris-Kasugai(フォルダ名は TetrisAI のまま)
+リポジトリ: https://github.com/fiss-vinbows/Tetris-KasugAI(フォルダ名は TetrisAI のまま)
 ぷよぷよテトリス2 のテトリス対戦が対象。設計は [docs/DESIGN.md](docs/DESIGN.md)。
 
 ## 構成
