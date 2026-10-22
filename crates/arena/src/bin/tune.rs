@@ -5,7 +5,9 @@
 //! 2. +側と−側を、同じミノ列で手番を入れ替えて何局も対戦させる(同じプロセス内の探索、幅は固定)
 //! 3. 勝ち越した側へ重みを動かす: θ += 学習率 × c × (+側の勝ち − −側の勝ち)/局数 × δ
 //!
-//! 初心者向けの減点(ソフトドロップ・途中で止める)は、強さのために削られないよう調整しない。
+//! 初心者向けの減点(ソフトドロップ・途中で止める)と、ソフトドロップの段数(`soft_drop_rows`)は調整しない。
+//! 対戦シミュレーションは1手を1単位で進めるだけでソフトドロップにかかる時間を再現しないので、調整すると
+//! 時間の損が見えないまま減点が削られるため。中あけ積みを始める高さ(ユーザーの指定)も調整しない。
 //!
 //! 使い方(TetrisAI フォルダで):
 //!     cargo run --release -p tetrisai-arena --bin tune -- [オプション]
@@ -17,6 +19,7 @@
 //!   --threads <数>         同時に進める対局数(既定: 論理コア数)
 //!   --max-pieces <数>      1人あたりの手数の上限。達したら危なさ(高さ + 予告)で判定する(既定 300)
 //!   --init <file>          最初の重み(TOML。既定は既定値)
+//!   --no-opponent          相手の情報を使わずに対戦させる(TBA は相手の盤面をまだ読まないので、実際に使う条件に合わせる)
 //!   --lr <数>              最初の学習率(既定 0.5)
 //!   --c <数>               最初のずらし幅(重みの大きさに対する割合。既定 0.25)
 
@@ -36,7 +39,7 @@ use tetrisai_core::Rules;
 use tetrisai_engine::Weights;
 
 /// 調整する重みの名前(Weights のフィールド。配列は [添字])。
-const NAMES: [&str; 31] = [
+const NAMES: [&str; 36] = [
     "cell_coveredness",
     "holes",
     "row_transitions",
@@ -68,6 +71,11 @@ const NAMES: [&str; 31] = [
     "attack_sent_danger",
     "lethal",
     "threat_overflow",
+    "center_well_rows",
+    "center_well_side_diff",
+    "air_tsd_slot",
+    "tsd_slot_any",
+    "pc_chance",
 ];
 
 fn get_params(w: &Weights) -> Vec<f64> {
@@ -103,6 +111,11 @@ fn get_params(w: &Weights) -> Vec<f64> {
         w.attack_sent_danger,
         w.lethal,
         w.threat_overflow,
+        w.center_well_rows,
+        w.center_well_side_diff,
+        w.air_tsd_slot,
+        w.tsd_slot_any,
+        w.pc_chance,
     ];
     v.iter().map(|&x| x as f64).collect()
 }
@@ -131,6 +144,11 @@ fn set_params(w: &mut Weights, v: &[f64]) {
     w.attack_sent_danger = f(28);
     w.lethal = f(29);
     w.threat_overflow = f(30);
+    w.center_well_rows = f(31);
+    w.center_well_side_diff = f(32);
+    w.air_tsd_slot = f(33);
+    w.tsd_slot_any = f(34);
+    w.pc_chance = f(35);
 }
 
 /// 学習率とずらし幅の減り方(反復回数 k に対して)
@@ -157,6 +175,7 @@ fn main() {
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
     let threads = num("--threads", cores as f64) as usize;
     let rules = Rules::ppt2();
+    let use_opponent = !args.iter().any(|a| a == "--no-opponent");
     let config = GameConfig {
         rules: rules.clone(),
         think: Duration::ZERO,
@@ -220,6 +239,8 @@ fn main() {
                     let plus_first = g.is_multiple_of(2);
                     let mut p = EngineAgent::new(plus.clone(), rules.clone(), width, "+");
                     let mut m = EngineAgent::new(minus.clone(), rules.clone(), width, "-");
+                    p.use_opponent = use_opponent;
+                    m.use_opponent = use_opponent;
                     let result = if plus_first {
                         play_game([&mut p, &mut m], seed, &config)
                     } else {
@@ -270,7 +291,7 @@ fn main() {
 
 /// 途中経過(state.json)と、今の重み(latest.toml と、反復回数付きの控え)を保存する。
 fn save(out: &Path, k: usize, theta: &[f64], base: &Weights) {
-    let state = json!({"k": k, "names": NAMES, "theta": theta});
+    let state = json!({"k": k, "names": NAMES.to_vec(), "theta": theta});
     fs::write(out.join("state.json"), serde_json::to_string_pretty(&state).unwrap()).unwrap();
     let mut w = base.clone();
     set_params(&mut w, theta);
