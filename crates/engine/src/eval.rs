@@ -86,6 +86,13 @@ pub struct Weights {
     pub pc_chance: f32,
     /// ソフトドロップで落とした段数1段あたり(低い盤面での Tスピンは落とす時間が長く効率が悪い)
     pub soft_drop_rows: f32,
+
+    // ---- C-spin(暫定。既定値は0で効かない。試験用の重みは config/weights/experimental_cspin.toml) ----
+    /// TST の溝(縦向きの T を入れると3行消える形)1つあたり(2つまで)
+    pub tst_slot: f32,
+    /// C-spin(TST の溝に T を入れて3行消した後に TSD の溝ができる形)1つあたり(1つまで)。
+    /// 名前の由来(鎹を逆向きにした形)どおり、TST → TSD を組む形を積極的に目指させる
+    pub c_spin: f32,
 }
 
 /// 盤面の評価に渡す、局面ごとの値。
@@ -156,6 +163,8 @@ impl Default for Weights {
             tsd_slot_any: 0.0,
             pc_chance: 0.0,
             soft_drop_rows: 0.0,
+            tst_slot: 0.0,
+            c_spin: 0.0,
         }
     }
 }
@@ -218,6 +227,12 @@ pub fn evaluate(w: &Weights, board: &Board, back_to_back: bool, ctx: &EvalContex
     }
     if w.pc_chance != 0.0 && shape::pc_possible(board) {
         e += w.pc_chance;
+    }
+    if w.tst_slot != 0.0 {
+        e += w.tst_slot * shape::tst_slots(board).len().min(2) as f32;
+    }
+    if w.c_spin != 0.0 {
+        e += w.c_spin * shape::c_spins(board).min(1) as f32;
     }
 
     // T溝: 見つかった溝に T を入れたと仮定し、消える行数で点を付ける(2行以上消えるなら消して次を探す)
@@ -409,6 +424,21 @@ mod tests {
         // 相手の情報が無ければ、届く攻撃の点(既定 0)だけ
         let none = BattleContext::default();
         assert_eq!(battle_value(&w, &none, 4, 5), 0.0);
+    }
+
+    #[test]
+    fn c_spinの加点() {
+        let w = Weights { tst_slot: 2.0, c_spin: 3.0, ..Weights::default() };
+        let ctx = EvalContext::default();
+        let gain = |b: &Board| evaluate(&w, b, false, &ctx) - evaluate(&Weights::default(), b, false, &ctx);
+        // C-spin の形(shape.rs のテストと同じ盤面): TST の溝 +2 と C-spin +3
+        let c_spin = Board::from_rows(&[
+            "##........", "##..#..#..", "####...###", "####.#####", "####..####", "####.#####", "#####.####",
+        ]);
+        assert!((gain(&c_spin) - 5.0).abs() < 1e-4, "{}", gain(&c_spin));
+        // TST の溝だけ(TST の後に TSD が続かない)なら +2
+        let tst_only = Board::from_rows(&["####.#####", "####..####", "####.#####"]);
+        assert!((gain(&tst_only) - 2.0).abs() < 1e-4, "{}", gain(&tst_only));
     }
 
     #[test]

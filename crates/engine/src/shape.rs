@@ -1,9 +1,9 @@
-//! 盤面の形の認識(M5): T溝(空中のものを含む)、中あけの行、中盤のパフェの見込み。
+//! 盤面の形の認識(M5): T溝(空中のものを含む)、中あけの行、中盤のパフェの見込み、TST の溝と C-spin。
 //!
 //! どれも行ごとの「空きマスの並び」(10ビット)だけで判定するので速い(評価関数の中で毎回呼べる)。
 
 use tetrisai_core::board::WIDTH;
-use tetrisai_core::Board;
+use tetrisai_core::{Board, Piece, PieceLocation, Rotation};
 
 const ROW_FULL: u16 = (1 << WIDTH) - 1;
 /// 中あけ4列(左から4〜7列目、x=3〜6)
@@ -49,6 +49,49 @@ pub fn tsd_slots(board: &Board) -> Vec<(i8, i8)> {
     slots
 }
 
+/// TST の溝(縦向きの T を入れると3行消える形)の、T の置き場所の一覧。
+///
+/// 出っ張りが右の T(東向き、中心 (x, y))なら: y−1 行目と y+1 行目の空きがちょうど x の1マス、
+/// y 行目の空きがちょうど x と x+1 の2マス。左右反転(西向き、出っ張りが左)も同じ。
+/// T の軸の上 (x, y+2) が空いていること(入口)も条件にする。上下の行が x 以外埋まっているので、
+/// 斜め4マスがすべて埋まり、回転で入れれば必ず Tスピン(TST)になる。入れ方(回転で届くか)までは確かめない。
+/// CC2 譲りの `tslot` は横向きの T しか見ないので、TST の溝は見つけられない。
+pub fn tst_slots(board: &Board) -> Vec<PieceLocation> {
+    let top = board.max_height();
+    let mut slots = Vec::new();
+    for y in 1..top {
+        let (lo, mid, hi) = (!row(board, y - 1) & ROW_FULL, !row(board, y) & ROW_FULL, !row(board, y + 1) & ROW_FULL);
+        if lo.count_ones() != 1 || lo != hi || mid.count_ones() != 2 {
+            continue;
+        }
+        let x = lo.trailing_zeros() as i8;
+        if board.occupied((x, y as i8 + 2)) {
+            continue; // 入口がふさがっている
+        }
+        for (dx, rotation) in [(1i8, Rotation::East), (-1, Rotation::West)] {
+            let nub = x + dx;
+            if (0..WIDTH as i8).contains(&nub) && mid == lo | 1 << nub {
+                slots.push(PieceLocation::new(Piece::T, rotation, x, y as i8));
+            }
+        }
+    }
+    slots
+}
+
+/// C-spin の数: TST の溝に T を入れて3行消した後の盤面に、TSD の溝があるもの(TST → TSD につながる形)。
+///
+/// 型紙と照らし合わせるのではなく「TST を撃った後に TSD が続くか」で判定するので、左右反転や細かい形の違いも拾える。
+pub fn c_spins(board: &Board) -> usize {
+    tst_slots(board)
+        .iter()
+        .filter(|loc| {
+            let mut after = *board;
+            after.place(loc);
+            after.clear_full_lines() == 3 && !tsd_slots(&after).is_empty()
+        })
+        .count()
+}
+
 /// 中あけの行(左右の3列ずつが埋まり、中央4列がすべて空いている行)の数。REN に使える行の目安。
 pub fn center_well_rows(board: &Board) -> u32 {
     (0..board.max_height()).filter(|&y| row(board, y) == SIDES).count() as u32
@@ -92,6 +135,48 @@ pub fn pc_possible(board: &Board) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tstの溝() {
+        // 出っ張りが右の TST の溝(x=4)
+        let right = Board::from_rows(&["..........", "####.#####", "####..####", "####.#####"]);
+        assert_eq!(tst_slots(&right), vec![PieceLocation::new(Piece::T, Rotation::East, 4, 1)]);
+        // 左右反転(出っ張りが左)
+        let left = Board::from_rows(&["####.#####", "###..#####", "####.#####"]);
+        assert_eq!(tst_slots(&left), vec![PieceLocation::new(Piece::T, Rotation::West, 4, 1)]);
+        // 入口(軸の上)がふさがっていれば溝ではない
+        let covered = Board::from_rows(&["....#.....", "####.#####", "####..####", "####.#####"]);
+        assert!(tst_slots(&covered).is_empty());
+        // TST の後に TSD の溝が無いので C-spin ではない
+        assert_eq!(c_spins(&right), 0);
+    }
+
+    /// examples/cspin_search で見つけた、実際に SRS で TST → TSD が入る C-spin の形(下が1段目)。
+    /// 左に屋根(6段目の5列目)・右が開いた「コ」の字の空間に T を入れて TST、消えた後は入口だった5段目が
+    /// 1段目の上に落ちて TSD の溝になる。
+    pub(crate) fn c_spin_board() -> Board {
+        Board::from_rows(&[
+            "##........", // 7段目
+            "##..#..#..", // 6段目(5列目が屋根)
+            "####...###", // 5段目(TST の入口 → TST の後は TSD の上の行)
+            "####.#####", // 4段目 ┐
+            "####..####", // 3段目 ├ TST の溝(出っ張り右)
+            "####.#####", // 2段目 ┘
+            "#####.####", // 1段目(TSD の溝の底)
+        ])
+    }
+
+    #[test]
+    fn c_spinの形() {
+        let board = c_spin_board();
+        assert_eq!(tst_slots(&board), vec![PieceLocation::new(Piece::T, Rotation::East, 4, 2)]);
+        assert_eq!(c_spins(&board), 1);
+        // 底の空きが TST の出っ張りの反対側(4列目)だと、TST の後に TSD の溝にならない
+        let mut wrong = board;
+        wrong.cols[5] |= 1;
+        wrong.cols[3] &= !1;
+        assert_eq!(c_spins(&wrong), 0);
+    }
 
     #[test]
     fn 普通のtsdの溝() {

@@ -190,3 +190,39 @@ fn 試験用の重みは低い偶数の盤面でパフェを取る() {
     let (steps, end) = run_plan(&root, &experimental_weights());
     assert!(end.board.is_empty(), "パフェを取っていない: {steps:?}");
 }
+
+// ---------------- C-spin(暫定。試験用の重み) ----------------
+
+fn cspin_weights() -> Weights {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/weights/experimental_cspin.toml");
+    toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// C-spin の完成形(examples/cspin_search で見つけた、実際に SRS で入る形)では、TST → すぐ TSD と撃つ。
+#[test]
+fn 試験用の重みはc_spinでtstからすぐtsdを撃つ() {
+    let board = Board::from_rows(&[
+        "##........", "##..#..#..", "####...###", "####.#####", "####..####", "####.#####", "#####.####",
+    ]);
+    let root = Root {
+        state: PlayerState::new(board),
+        queue: vec![Piece::T, Piece::T, Piece::O, Piece::I, Piece::L, Piece::S],
+        ..Default::default()
+    };
+    let (steps, _) = run_plan(&root, &cspin_weights());
+    assert_eq!(steps[0], (Piece::T, Spin::Full, 3), "1手目で TST: {steps:?}");
+    assert_eq!(steps[1], (Piece::T, Spin::Full, 2), "2手目で TSD: {steps:?}");
+}
+
+/// 屋根の無い C-spin の途中の形では、J で屋根を作って C-spin を組み上げ、TST を撃つ(組み上げる途中から目指す)。
+#[test]
+fn 試験用の重みは屋根を作ってc_spinを組み上げる() {
+    let board = Board::from_rows(&["##........", "####...###", "####.#####", "####..####", "####.#####", "#####.####"]);
+    let root = Root {
+        state: PlayerState::new(board),
+        queue: vec![Piece::J, Piece::T, Piece::O, Piece::T, Piece::I, Piece::L],
+        ..Default::default()
+    };
+    let (steps, _) = run_plan(&root, &cspin_weights());
+    assert!(steps.contains(&(Piece::T, Spin::Full, 3)), "TST を撃っていない: {steps:?}");
+}
