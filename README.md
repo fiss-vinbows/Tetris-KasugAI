@@ -4,6 +4,12 @@ TBA(Tetris Beginner Assistance、`../Tetris`)の思考エンジン Cold Clear 2 
 リポジトリ: https://github.com/fiss-vinbows/Tetris-KasugAI(フォルダ名は TetrisAI のまま)
 ぷよぷよテトリス2 のテトリス対戦が対象。設計は [docs/DESIGN.md](docs/DESIGN.md)。
 
+## 名前の由来
+
+鎹(かすがい)は、両端が尖った「コ」の字型の金属製の釘。逆向きにするとテトリスの **C-spin** の形によく似ている。
+C-spin は TST→TSD を組むための技術思想そのもので、このAIにも積極的に採用してもらう意図を込めている。
+末尾を大文字にした(Kasugai ではなく **KasugAI**)のは、AI であることを主張するため。
+
 ## 構成
 
 - `crates/core/` — 盤面(ビットボード)・ミノ・SRS・手の生成・ルール(攻撃量・B2B・REN)
