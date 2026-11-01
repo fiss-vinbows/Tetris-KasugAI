@@ -75,20 +75,22 @@ pub struct Weights {
     pub threat_overflow: f32,
 
     // ---- 中盤の作戦(M5。既定値はすべて0で効かない。試験用の重みは config/weights/experimental_m5.toml) ----
-    /// 中あけの行(左右3列ずつが埋まり中央4列が空いた行)1行あたり。中あけ積みのときだけ効く
+    //
+    // 【2026-11-01・ユーザー】中あけ専用の作戦(「低ければ中あけ積み、何段で撃つ」の切り替え)はやめ、どの局面でも
+    // 同じ評価で比べる。中あけを選ぶかどうか・いつ撃つかは、貯めた REN の火力(`ren_potential`)と、高さ・予告・
+    // 相手の攻撃の準備による危なさ(既存の項目)のつり合いで決まる。
+    /// 中あけの行(左右3列ずつが埋まり中央4列が空いた行)1行あたり
     pub center_well_rows: f32,
-    /// 中あけの左右の高さの差1段あたり。中あけ積みのときだけ効く
+    /// 中あけの左右の高さの差1段あたり(中あけの行があるときだけ数える)
     pub center_well_side_diff: f32,
-    /// 中あけの上(空中)に TSD の溝がある。中あけ積みのときだけ効く
+    /// 中あけの上(空中)に TSD の溝がある
     pub air_tsd_slot: f32,
-    /// 中あけ積みを始める高さ(探索の出発点の盤面がこの段数以下か、すでに中あけが2行以上あれば中あけ積み)
-    pub center_well_start_height: f32,
-    /// 中あけの底に種3(中央4列の3マス)がある。中あけ積みのときだけ効く(2026-11-01。種0のまま積んで REN を
-    /// 撃てなかったため)
+    /// 中央4列の底に種3(中央4列の3マス)がある(2026-11-01。左右が埋まる前の、対局の始めにしか作れない。
+    /// 中あけの火力はその4〜5手先まで見えないので、種を置いておく価値をここで付ける)
     pub center_well_seed: f32,
-    /// 中あけ積みをやめて REN を撃ち始める高さ(探索の出発点の盤面がこの段数以上なら中あけ積みをしない)。
-    /// REN が続いている間(出発点で REN 中)も中あけ積みに戻らず撃ち続ける。0 ならこの条件は使わない(2026-11-01)
-    pub center_well_fire_height: f32,
+    /// 中あけに貯めた REN の火力(今の REN の続きから、`shape::ren_rows` の行数だけ REN を続けたときの、
+    /// REN 表による攻撃の合計)1行あたり。実際に撃った攻撃(`combo_attack` など)と同じ物差しで比べる
+    pub ren_potential: f32,
     /// TSD の溝(空中のものを含む、一般的な形)1つあたり(2つまで)。`tslot` は CC2 と同じ単純な形しか見ない
     pub tsd_slot_any: f32,
     /// 中盤のパフェの見込みがある形(埋まりマスが偶数・穴なし・4段以内でそろえられる)
@@ -111,8 +113,8 @@ pub struct EvalContext {
     pub t_available: usize,
     /// 予告の影響(高さに上乗せする)
     pub garbage: Garbage,
-    /// 中あけ積みの作戦をとっているか
-    pub center_well: bool,
+    /// この局面の REN の状態(続けて消した回数。0 なら REN 中でない)
+    pub consecutive_clears: u32,
 }
 
 /// 相手の情報から作る、評価に使う値(探索の最初に1回だけ計算する)。
@@ -168,9 +170,8 @@ impl Default for Weights {
             center_well_rows: 0.0,
             center_well_side_diff: 0.0,
             air_tsd_slot: 0.0,
-            center_well_start_height: 5.0,
             center_well_seed: 0.0,
-            center_well_fire_height: 0.0,
+            ren_potential: 0.0,
             tsd_slot_any: 0.0,
             pc_chance: 0.0,
             soft_drop_rows: 0.0,
@@ -213,22 +214,8 @@ pub fn reward(w: &Weights, rules: &Rules, mv: &Move, result: &ClearResult) -> f3
     r
 }
 
-/// 中あけ積みの作戦をとるか(探索の出発点の局面で1回だけ決める)。中あけの重みが0なら、とらない。
-///
-/// `consecutive_clears` は出発点の REN の状態(0 なら REN 中でない)。【2026-11-01・ユーザー】中あけは積めるだけ
-/// 積んでから REN を撃つ: `center_well_fire_height` 以上の高さか、REN を撃っている途中なら中あけ積みをしない
-/// (通常の評価で、高さを下げるために中あけへミノを入れて REN を続ける)。
-pub fn center_well_mode(w: &Weights, board: &Board, consecutive_clears: u32) -> bool {
-    if w.center_well_rows == 0.0 {
-        return false;
-    }
-    let firing = consecutive_clears > 0
-        || w.center_well_fire_height > 0.0 && board.max_height() as f32 >= w.center_well_fire_height;
-    !firing && (board.max_height() as f32 <= w.center_well_start_height || shape::center_well_rows(board) >= 2)
-}
-
 /// 盤面の評価。
-pub fn evaluate(w: &Weights, board: &Board, back_to_back: bool, ctx: &EvalContext) -> f32 {
+pub fn evaluate(w: &Weights, rules: &Rules, board: &Board, back_to_back: bool, ctx: &EvalContext) -> f32 {
     let (t_available, garbage) = (ctx.t_available, ctx.garbage);
     let mut e = 0.0;
     if back_to_back {
@@ -239,13 +226,21 @@ pub fn evaluate(w: &Weights, board: &Board, back_to_back: bool, ctx: &EvalContex
     if w.tsd_slot_any != 0.0 {
         e += w.tsd_slot_any * shape::tsd_slots(board).len().min(2) as f32;
     }
-    if ctx.center_well {
-        e += w.center_well_rows * shape::center_well_rows(board) as f32;
-        e += w.center_well_side_diff * shape::center_well_side_diff(board) as f32;
-        e += w.air_tsd_slot * shape::has_air_tsd(board).min(1) as f32;
-        if w.center_well_seed != 0.0 && shape::center_well_seed(board) == 3 {
-            e += w.center_well_seed;
+    if w.center_well_rows != 0.0 || w.center_well_side_diff != 0.0 {
+        let rows = shape::center_well_rows(board);
+        if rows > 0 {
+            e += w.center_well_rows * rows as f32;
+            e += w.center_well_side_diff * shape::center_well_side_diff(board) as f32;
         }
+    }
+    if w.air_tsd_slot != 0.0 {
+        e += w.air_tsd_slot * shape::has_air_tsd(board).min(1) as f32;
+    }
+    if w.center_well_seed != 0.0 && shape::center_well_seed(board) == 3 {
+        e += w.center_well_seed;
+    }
+    if w.ren_potential != 0.0 {
+        e += w.ren_potential * ren_potential(rules, board, ctx.consecutive_clears) as f32;
     }
     if w.pc_chance != 0.0 && shape::pc_possible(board) {
         e += w.pc_chance;
@@ -317,6 +312,13 @@ pub fn evaluate(w: &Weights, board: &Board, back_to_back: bool, ctx: &EvalContex
     e += w.row_transitions * transitions as f32;
 
     e
+}
+
+/// 中あけに貯めた REN の火力(行数)。今の REN(`consecutive_clears` 回続けて消した)の続きから、
+/// `shape::ren_rows` の行数だけ REN を続けたときの、REN 表による攻撃の合計。
+pub fn ren_potential(rules: &Rules, board: &Board, consecutive_clears: u32) -> u32 {
+    // 次に消す手の REN は consecutive_clears(PlayerState::apply と同じ数え方)
+    (0..shape::ren_rows(board)).map(|k| rules.combo_attack(consecutive_clears + k)).sum()
 }
 
 /// 対戦の駆け引きの評価。`outgoing` はこの局面までに相手に届く攻撃(相殺に使った分を除く)、
@@ -396,13 +398,17 @@ fn tslot_right(board: &Board) -> Option<PieceLocation> {
 mod tests {
     use super::*;
 
+    fn rules() -> Rules {
+        Rules::ppt2()
+    }
+
     #[test]
     fn 穴があると評価が下がる() {
         let w = Weights::default();
         let flat = Board::from_rows(&["#########."]);
         let hole = Board::from_rows(&["#########.", "####.#####"]);
         let ctx = EvalContext { t_available: 1, ..Default::default() };
-        assert!(evaluate(&w, &hole, false, &ctx) < evaluate(&w, &flat, false, &ctx));
+        assert!(evaluate(&w, &rules(), &hole, false, &ctx) < evaluate(&w, &rules(), &flat, false, &ctx));
     }
 
     #[test]
@@ -416,8 +422,8 @@ mod tests {
         let loc = tslot_left(&board).or_else(|| tslot_right(&board));
         assert!(loc.is_some());
         let w = Weights::default();
-        let with = evaluate(&w, &board, false, &EvalContext { t_available: 1, ..Default::default() });
-        let without = evaluate(&w, &board, false, &EvalContext::default());
+        let with = evaluate(&w, &rules(), &board, false, &EvalContext { t_available: 1, ..Default::default() });
+        let without = evaluate(&w, &rules(), &board, false, &EvalContext::default());
         assert!((with - without - w.tslot[2]).abs() < 1e-5, "TSD の溝は tslot[2] の点");
     }
 
@@ -452,7 +458,7 @@ mod tests {
     fn c_spinの加点() {
         let w = Weights { tst_slot: 2.0, c_spin: 3.0, ..Weights::default() };
         let ctx = EvalContext::default();
-        let gain = |b: &Board| evaluate(&w, b, false, &ctx) - evaluate(&Weights::default(), b, false, &ctx);
+        let gain = |b: &Board| evaluate(&w, &rules(), b, false, &ctx) - evaluate(&Weights::default(), &rules(), b, false, &ctx);
         // C-spin の形(shape.rs のテストと同じ盤面): TST の溝 +2 と C-spin +3
         let c_spin = Board::from_rows(&[
             "##........", "##..#..#..", "####...###", "####.#####", "####..####", "####.#####", "#####.####",
@@ -465,55 +471,72 @@ mod tests {
 
     #[test]
     fn 新しい作戦の重みは既定では効かない() {
-        // 中あけ・空中TSD・パフェの見込みがそろった盤面でも、既定の重みでは中あけ積みにならず点も変わらない
+        // 中あけ・空中TSD・パフェの見込み・種3・貯めた REN の火力がそろった盤面でも、既定の重みでは点が変わらない
         let w = Weights::default();
-        let board = Board::from_rows(&["##........", "###....###", "###....###"]);
-        assert!(!center_well_mode(&w, &board, 0));
-        let off = EvalContext { t_available: 1, ..Default::default() };
-        let on = EvalContext { center_well: true, ..off };
-        assert_eq!(evaluate(&w, &board, false, &off), evaluate(&w, &board, false, &on));
+        let board = Board::from_rows(&["##........", "###....###", "###....###", "###.######"]);
+        let base = Weights {
+            center_well_rows: 0.0,
+            center_well_side_diff: 0.0,
+            air_tsd_slot: 0.0,
+            center_well_seed: 0.0,
+            ren_potential: 0.0,
+            tsd_slot_any: 0.0,
+            pc_chance: 0.0,
+            ..Weights::default()
+        };
+        let ctx = EvalContext { t_available: 1, ..Default::default() };
+        assert_eq!(evaluate(&w, &rules(), &board, false, &ctx), evaluate(&base, &rules(), &board, false, &ctx));
     }
 
     #[test]
-    fn 中あけ積みの評価() {
+    fn 中あけの評価() {
         let w = Weights { center_well_rows: 1.0, center_well_side_diff: -0.5, ..Weights::default() };
-        let well = Board::from_rows(&["###....###", "###....###"]);
-        assert!(center_well_mode(&w, &well, 0));
-        let ctx = EvalContext { t_available: 1, center_well: true, ..Default::default() };
-        let base = evaluate(&Weights::default(), &well, false, &ctx);
-        assert!((evaluate(&w, &well, false, &ctx) - base - 2.0).abs() < 1e-4, "中あけ2行で +2");
-        // 高い盤面で中あけが無ければ、中あけ積みの作戦はとらない
-        assert!(!center_well_mode(&w, &Board::from_rows(&["#########."; 8]), 0));
-    }
-
-    #[test]
-    fn 積み上げたら中あけ積みをやめてrenを撃つ() {
-        // 【2026-11-01・ユーザー】可能な限り積み上げてから撃つ。撃ち始めたら REN が続く間は中あけ積みに戻らない
-        let w = Weights { center_well_rows: 1.0, center_well_fire_height: 6.0, ..Weights::default() };
-        assert!(center_well_mode(&w, &Board::from_rows(&["###....###"; 5]), 0), "5段: まだ積む");
-        assert!(!center_well_mode(&w, &Board::from_rows(&["###....###"; 6]), 0), "6段: 撃つ");
-        assert!(!center_well_mode(&w, &Board::from_rows(&["###....###"; 5]), 2), "REN 中は撃ち続ける");
-        // 0 なら高さでは撃たない(今までどおり)
-        let never = Weights { center_well_fire_height: 0.0, ..w };
-        assert!(center_well_mode(&never, &Board::from_rows(&["###....###"; 18]), 0));
+        let ctx = EvalContext { t_available: 1, ..Default::default() };
+        let gain = |rows: &[&str]| {
+            let b = Board::from_rows(rows);
+            evaluate(&w, &rules(), &b, false, &ctx) - evaluate(&Weights::default(), &rules(), &b, false, &ctx)
+        };
+        assert!((gain(&["###....###", "###....###"]) - 2.0).abs() < 1e-4, "中あけ2行で +2");
+        // 左右の差は中あけの行があるときだけ数える
+        assert!((gain(&["###.......", "###....###", "###....###"]) - 1.5).abs() < 1e-4, "左右の差1段で −0.5");
+        assert_eq!(gain(&["###.......", "#########."]), 0.0, "中あけが無ければ左右の差も数えない");
     }
 
     #[test]
     fn 種3の加点() {
-        let w = Weights { center_well_rows: 1.0, center_well_seed: 4.0, ..Weights::default() };
-        let ctx = EvalContext { t_available: 1, center_well: true, ..Default::default() };
+        let w = Weights { center_well_seed: 4.0, ..Weights::default() };
+        let ctx = EvalContext { t_available: 1, ..Default::default() };
         let gain = |rows: &[&str]| {
             let b = Board::from_rows(rows);
-            evaluate(&w, &b, false, &ctx) - evaluate(&Weights { center_well_seed: 0.0, ..w.clone() }, &b, false, &ctx)
+            evaluate(&w, &rules(), &b, false, &ctx) - evaluate(&Weights::default(), &rules(), &b, false, &ctx)
         };
         assert!((gain(&["###....###", "###.######"]) - 4.0).abs() < 1e-4, "種3(1行)");
         assert!((gain(&["###....###", "###.#..###", "#####..###"]) - 4.0).abs() < 1e-4, "種3(2行にまたがる)");
+        assert!((gain(&["...###...."]) - 4.0).abs() < 1e-4, "左右が埋まる前の種3(対局の始め)");
         assert!(gain(&["###....###", "###....###"]).abs() < 1e-4, "種0");
         assert!(gain(&["###....###", "###..#.###", "###.######"]).abs() < 1e-4, "種4");
-        // 中あけ積みでないときは効かない
-        let b = Board::from_rows(&["###....###", "###.######"]);
-        let off = EvalContext { center_well: false, ..ctx };
-        assert_eq!(evaluate(&w, &b, false, &off), evaluate(&Weights { center_well_seed: 0.0, ..w.clone() }, &b, false, &off));
+    }
+
+    #[test]
+    fn 貯めたrenの火力() {
+        let rules = rules();
+        // 種3 + 中あけ5行 = 6行の REN。REN 表 [0,0,1,1,2,2,...] で 0+0+1+1+2+2 = 6
+        let mut rows = vec!["###....###"; 5];
+        rows.push("###.######");
+        let board = Board::from_rows(&rows);
+        assert_eq!(ren_potential(&rules, &board, 0), 6);
+        // 2回続けて消した後(REN 中)なら、続きの REN で 1+1+2+2+3+3 = 12
+        assert_eq!(ren_potential(&rules, &board, 2), 12);
+        assert_eq!(ren_potential(&rules, &Board::from_rows(&["#########."; 4]), 0), 0, "テトリスの井戸は数えない");
+        // 評価では1行あたり ren_potential の点
+        let w = Weights { ren_potential: 0.5, ..Weights::default() };
+        let ctx = EvalContext { t_available: 1, ..Default::default() };
+        let gain = evaluate(&w, &rules, &board, false, &ctx) - evaluate(&Weights::default(), &rules, &board, false, &ctx);
+        assert!((gain - 3.0).abs() < 1e-4, "{gain}");
+        // 中あけを高く積むほど1行あたりの火力が増える(REN 表が伸びる)
+        let mut tall = vec!["###....###"; 11];
+        tall.push("###.######");
+        assert_eq!(ren_potential(&rules, &Board::from_rows(&tall), 0), 6 + 3 + 3 + 4 + 4 + 5 + 5);
     }
 
     #[test]
@@ -522,7 +545,7 @@ mod tests {
         let even = Board::from_rows(&["########.."]);
         let odd = Board::from_rows(&["#########."]);
         let ctx = EvalContext::default();
-        let gain = |b: &Board| evaluate(&w, b, false, &ctx) - evaluate(&Weights::default(), b, false, &ctx);
+        let gain = |b: &Board| evaluate(&w, &rules(), b, false, &ctx) - evaluate(&Weights::default(), &rules(), b, false, &ctx);
         assert!((gain(&even) - 3.0).abs() < 1e-4);
         assert_eq!(gain(&odd), 0.0, "奇数は考えない");
     }

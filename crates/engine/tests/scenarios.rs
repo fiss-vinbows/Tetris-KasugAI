@@ -191,65 +191,75 @@ fn 試験用の重みは低い偶数の盤面でパフェを取る() {
     assert!(end.board.is_empty(), "パフェを取っていない: {steps:?}");
 }
 
-// ---------------- 種3の中あけ REN(2026-11-01。重み m5_seed3.toml) ----------------
+// ---------------- 状況で選ぶ中あけ REN(2026-11-01。重み experimental_ren.toml) ----------------
+//
+// 【2026-11-01・ユーザー】「中あけREN専用のAIという概念自体が設計思想と合わない。状況を見て中あけRENが最善と
+// みなす考え方が必要」。中あけ積みの切り替え(何段以下で積む・何段で撃つ)は取り除き、貯めた REN の火力
+// (`ren_potential`)を、高さ・予告による危なさと同じ評価の中で比べる。同じ重みのまま、局面によって
+// 貯める・撃つ・作らないが変わることを確かめる。
 
-fn seed3_weights() -> Weights {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/weights/m5_seed3.toml");
+fn ren_weights() -> Weights {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/weights/experimental_ren.toml");
     toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
 fn board_text(board: &Board) -> String {
-    board.to_rows().join("\n")
+    board.to_rows().join("
+")
 }
 
-/// 実機で種0のまま天井まで積み、REN を撃てなかった(ユーザー「種3の概念が理解できておらず種0になっている」)。
-/// 対局の始め(空の盤面)から、中央4列の底に種3を置いて左右を積む。
-/// 左右が埋まった後の中あけでは、ミノは中央に4マスずつ入り消える行も中央の4マスを消すので、中央のマス数の
-/// 4で割った余りは変わらない(種0から種3にはできない)。種は左右がまだ埋まっていない対局の始めに作るしかない。
-#[test]
-fn 種3を置いて中あけを積む() {
-    for queue in [
-        [Piece::L, Piece::J, Piece::O, Piece::S, Piece::Z, Piece::T],
-        [Piece::T, Piece::I, Piece::O, Piece::L, Piece::J, Piece::S],
-        [Piece::J, Piece::Z, Piece::I, Piece::T, Piece::O, Piece::L],
-        [Piece::S, Piece::Z, Piece::O, Piece::I, Piece::T, Piece::L],
-    ] {
-        let root = Root { state: PlayerState::new(Board::default()), queue: queue.to_vec(), ..Default::default() };
-        let (steps, end) = run_plan(&root, &seed3_weights());
-        let seed = tetrisai_engine::shape::center_well_seed(&end.board);
-        assert_eq!(seed, 3, "種3になっていない {queue:?}: {steps:?}\n{}", board_text(&end.board));
-        assert!(steps.iter().all(|&(_, _, lines)| lines == 0), "積む途中で消した {queue:?}: {steps:?}");
-    }
+/// 種3(一番下)の上に、左右を埋めた中あけを `rows` 行積んだ盤面。
+fn seed3_well(rows: usize) -> Board {
+    let mut text = vec!["###....###"; rows];
+    text.push("###.######");
+    Board::from_rows(&text)
 }
 
-/// 左右を上限(18段)まで積んだら、中あけにミノを入れて REN を撃ち続ける。
+const REN_QUEUE: [Piece; 6] = [Piece::I, Piece::O, Piece::T, Piece::L, Piece::J, Piece::S];
+
+/// 盤面に余裕があり予告も無いうちは、撃たずに種3を残して積む(貯めるほど REN の火力が増える)。
 #[test]
-fn 積み上げたら種3からrenを撃つ() {
-    let mut rows = vec!["###....###"; 17];
-    rows.push("###.######"); // 種3
-    let root = Root {
-        state: PlayerState::new(Board::from_rows(&rows)),
-        queue: vec![Piece::I, Piece::O, Piece::T, Piece::L, Piece::J, Piece::S],
-        ..Default::default()
-    };
-    let (steps, _end) = run_plan(&root, &seed3_weights());
+fn 余裕があるうちは中あけに貯める() {
+    let root = Root { state: PlayerState::new(seed3_well(7)), queue: REN_QUEUE.to_vec(), ..Default::default() };
+    let (steps, end) = run_plan(&root, &ren_weights());
+    assert!(steps.iter().all(|&(_, _, lines)| lines == 0), "撃ってしまった: {steps:?}");
+    assert_eq!(tetrisai_engine::shape::center_well_seed(&end.board), 3, "{}", board_text(&end.board));
+}
+
+/// 高く積んで危なくなったら、中あけにミノを入れて REN を撃ち続ける(撃つ高さは決めていない)。
+#[test]
+fn 高くなったら中あけのrenを撃つ() {
+    let root = Root { state: PlayerState::new(seed3_well(17)), queue: REN_QUEUE.to_vec(), ..Default::default() };
+    let (steps, _) = run_plan(&root, &ren_weights());
     let ren = steps.iter().take_while(|&&(_, _, lines)| lines > 0).count();
     assert!(ren >= 5, "REN を撃ち続けていない(続いたのは {ren} 手): {steps:?}");
 }
 
-/// 上限より低いうちは撃たずに積み続ける(可能な限り積み上げる)。
+/// 貯めている途中でも、大きな予告が来たら REN を撃って相殺する(同じ盤面でも状況で判断が変わる)。
 #[test]
-fn 上限より低いうちは種3を残して積む() {
-    let mut rows = vec!["###....###"; 9];
-    rows.push("###.######");
+fn 予告が来たら中あけのrenで相殺する() {
     let root = Root {
-        state: PlayerState::new(Board::from_rows(&rows)),
-        queue: vec![Piece::I, Piece::O, Piece::T, Piece::L, Piece::J, Piece::S],
+        state: PlayerState::new(seed3_well(7)),
+        queue: REN_QUEUE.to_vec(),
+        incoming: vec![tetrisai_engine::IncomingGarbage { lines: 10, delay: 0 }],
         ..Default::default()
     };
-    let (steps, end) = run_plan(&root, &seed3_weights());
-    assert!(steps.iter().all(|&(_, _, lines)| lines == 0), "撃ってしまった: {steps:?}");
-    assert_eq!(tetrisai_engine::shape::center_well_seed(&end.board), 3, "{}", board_text(&end.board));
+    let (steps, _) = run_plan(&root, &ren_weights());
+    let ren = steps.iter().take_while(|&&(_, _, lines)| lines > 0).count();
+    assert!(ren >= 3, "予告を受けても REN を撃たない(続いたのは {ren} 手): {steps:?}");
+}
+
+/// 中あけ以外に良い形(おじゃまの穴を使った TST)があれば、そちらを選ぶ(中あけ専用にならない)。
+#[test]
+fn 良い形があれば中あけにこだわらない() {
+    let root = tst_position();
+    let options = SearchOptions { width: 512, max_depth: 6, speculate: false };
+    let r = search(&root, &options, &ren_weights(), &Rules::ppt2(), &|| false).unwrap();
+    let clears = plan_clears(&root, &r);
+    assert!(
+        clears.iter().any(|&(p, spin, lines)| p == Piece::T && spin == Spin::Full && lines == 3),
+        "TST が読み筋に入らない: {clears:?}"
+    );
 }
 
 // ---------------- C-spin(暫定。試験用の重み) ----------------

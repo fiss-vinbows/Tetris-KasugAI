@@ -1,6 +1,9 @@
 # 【2026-11-01・ユーザー「種3の概念が理解できておらず種0になっている」】m5_tuned_run6.toml(中あけ積み)をもとに、
 # 中あけの底の種3を加点し(center_well_seed)、左右を18段まで積んだら中あけ積みをやめて REN を撃つ(center_well_fire_height)。
 # ユーザーの方針は「可能な限り積み上げる」。可視の一番上は20段目(出現位置は中央4列の上なので左右を20段まで積んでもふさがない)。
+# 【2026-11-01・ユーザー「中あけREN専用のAIという概念自体が設計思想と合わない」】中あけ積みの切り替え(center_well_start_height・
+# center_well_fire_height)は取り除いた。このファイルは TBA の「KasugAI(中あけ)」が読むので残すが、中あけの項目がどの局面でも
+# 効くようになったため、以前とは動きが違う(設計書 8.9)。
 cell_coveredness = -0.036320512820512824
 max_cell_covered_height = 6
 holes = -1.176497435897436
@@ -31,9 +34,7 @@ threat_overflow = -2.1003615384615384
 center_well_rows = 2.6694820512820514
 center_well_side_diff = -0.26666410256410256
 air_tsd_slot = 3.0792358974358973
-center_well_start_height = 5.0
 center_well_seed = 5.0
-center_well_fire_height = 18.0
 tsd_slot_any = 0.8110628205128205
 pc_chance = 2.833094871794872
 soft_drop_rows = -0.05000000074505806

@@ -116,6 +116,50 @@ pub fn center_well_seed(board: &Board) -> u32 {
     seed
 }
 
+/// 中あけ REN で続けて消せる行数の見込み。
+///
+/// 【2026-11-01・ユーザー】中あけ専用の作戦にせず、状況を見て中あけ REN が最善かを判断する。そのために、
+/// 中あけに貯めた REN の火力を、TSD やテトリスと同じ物差し(攻撃の行数)で評価する(eval の `ren_potential`)。
+///
+/// 中央4列にマスがある一番下の行から上へ、左右6列が埋まった行を数える。下の2行までは種(中央の残りのマス、
+/// 合わせて6マスまで)があってよく、その上は中央4列がすべて空いた行だけを数える(テトリスの井戸のような、
+/// 中央が埋まりかけた行は中あけではない)。中央4列がすべて空いた行が無ければ 0。
+///
+/// 左右が埋まった中あけでは、中央のマス数を4で割った余りが変わらない(ミノは4マス入り、消える行も中央の
+/// 4マスを消す)。余り3(種3)なら、ミノを入れるたびに1行ずつ消えて全部の行で REN が続く。ほかの余りでは
+/// 途中で REN が切れやすいので、余り1・2は4分の3、余り0(種0)は半分に見積もる(大まかな目安)。
+pub fn ren_rows(board: &Board) -> u32 {
+    let height = board.max_height();
+    let Some(bottom) = (0..height).find(|&y| row(board, y) & CENTER != CENTER) else { return 0 };
+    let mut seed = 0;
+    let mut seed_rows = 0;
+    let mut empty_rows = 0;
+    for y in bottom..height {
+        let r = row(board, y);
+        let center = r & CENTER;
+        if r & SIDES != SIDES || center == CENTER {
+            break;
+        }
+        if center == 0 {
+            empty_rows += 1;
+        } else if empty_rows == 0 && seed_rows < 2 {
+            seed += center.count_ones();
+            seed_rows += 1;
+        } else {
+            break;
+        }
+    }
+    if empty_rows == 0 || seed > 6 {
+        return 0;
+    }
+    let rows = seed_rows + empty_rows;
+    match seed % 4 {
+        3 => rows,
+        0 => rows / 2,
+        _ => rows * 3 / 4,
+    }
+}
+
 /// 中あけの左右の高さの差(左3列の一番高いところと、右3列の一番高いところの差)。
 pub fn center_well_side_diff(board: &Board) -> u32 {
     let left = (0..3).map(|x| board.column_height(x)).max().unwrap();
@@ -228,6 +272,29 @@ mod tests {
         assert_eq!(center_well_rows(&board), 2);
         assert_eq!(has_air_tsd(&board), 1);
         assert_eq!(center_well_side_diff(&board), 0, "左右とも6段");
+    }
+
+    #[test]
+    fn 中あけrenで消せる行数() {
+        // 種3(1行)+ 中あけ4行: 5行すべてで REN が続く
+        let mut rows = vec!["###....###"; 4];
+        rows.push("###.######");
+        assert_eq!(ren_rows(&Board::from_rows(&rows)), 5);
+        // 種3が2行にまたがる(下に2マス・上に1マス)
+        assert_eq!(ren_rows(&Board::from_rows(&["###....###", "###....###", "###.#..###", "#####..###"])), 4);
+        // 種0(中あけ4行だけ)は半分、種2は4分の3
+        assert_eq!(ren_rows(&Board::from_rows(&["###....###"; 4])), 2);
+        assert_eq!(ren_rows(&Board::from_rows(&["###....###", "###....###", "###....###", "###.##.###"])), 3);
+        // 下に埋まった行があっても、中あけの部分から数える。左右が欠けた行より上は数えない
+        assert_eq!(ren_rows(&Board::from_rows(&["##.....###", "###....###", "###.######", "#########."])), 2);
+        // テトリスの井戸(中央の1列だけ空き)や平らな盤面は中あけではない
+        assert_eq!(ren_rows(&Board::from_rows(&["####.#####"; 4])), 0);
+        assert_eq!(ren_rows(&Board::from_rows(&["#########."; 4])), 0);
+        assert_eq!(ren_rows(&Board::new()), 0);
+        // 種だけで中あけの行が無い
+        assert_eq!(ren_rows(&Board::from_rows(&["###.######"])), 0);
+        // 空中TSD の盤面: 中あけ2行(種0)の上に TSD の形。中あけ2行の半分
+        assert_eq!(ren_rows(&air_board()), 1);
     }
 
     #[test]

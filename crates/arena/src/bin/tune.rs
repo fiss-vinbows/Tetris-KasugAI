@@ -39,7 +39,7 @@ use tetrisai_core::Rules;
 use tetrisai_engine::Weights;
 
 /// 調整する重みの名前(Weights のフィールド。配列は [添字])。
-const NAMES: [&str; 38] = [
+const NAMES: [&str; 40] = [
     "cell_coveredness",
     "holes",
     "row_transitions",
@@ -78,6 +78,8 @@ const NAMES: [&str; 38] = [
     "pc_chance",
     "tst_slot",
     "c_spin",
+    "center_well_seed",
+    "ren_potential",
 ];
 
 fn get_params(w: &Weights) -> Vec<f64> {
@@ -120,6 +122,8 @@ fn get_params(w: &Weights) -> Vec<f64> {
         w.pc_chance,
         w.tst_slot,
         w.c_spin,
+        w.center_well_seed,
+        w.ren_potential,
     ];
     v.iter().map(|&x| x as f64).collect()
 }
@@ -155,6 +159,8 @@ fn set_params(w: &mut Weights, v: &[f64]) {
     w.pc_chance = f(35);
     w.tst_slot = f(36);
     w.c_spin = f(37);
+    w.center_well_seed = f(38);
+    w.ren_potential = f(39);
 }
 
 /// 学習率とずらし幅の減り方(反復回数 k に対して)

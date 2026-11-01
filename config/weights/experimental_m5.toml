@@ -26,7 +26,6 @@ overflow = -11.71382
 center_well_rows = 3.0  # 1.5 では低い中あけで目先の TSD を優先して中央を埋めたので上げた
 center_well_side_diff = -0.3
 air_tsd_slot = 3.0
-center_well_start_height = 5.0
 tsd_slot_any = 0.8
 pc_chance = 3.0
 soft_drop_rows = -0.05

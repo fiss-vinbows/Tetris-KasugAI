@@ -28,7 +28,6 @@ threat_overflow = -2.1003615384615384
 center_well_rows = 2.6694820512820514
 center_well_side_diff = -0.26666410256410256
 air_tsd_slot = 3.0792358974358973
-center_well_start_height = 5.0
 tsd_slot_any = 0.8110628205128205
 pc_chance = 2.833094871794872
 soft_drop_rows = -0.05000000074505806
