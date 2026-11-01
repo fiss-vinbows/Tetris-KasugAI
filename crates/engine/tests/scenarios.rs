@@ -1,7 +1,7 @@
 //! ユーザーが TBA のシミュレーターで作った局面(input/ の画像)での探索のテスト。
 
 use tetrisai_core::{Board, Piece, PlayerState, Rules, Spin};
-use tetrisai_engine::{search, Root, SearchOptions, SearchResult, Weights};
+use tetrisai_engine::{search, Opening, Root, SearchOptions, SearchResult, Weights};
 
 /// input/practice_20261019_214932_696f65.png: おじゃまの穴(1段目4列目・2段目5列目)を使った TST→TSD の例。
 /// 操作ミノ I、HOLD T、NEXT S・T・L・T・S。
@@ -296,4 +296,59 @@ fn 試験用の重みは屋根を作ってc_spinを組み上げる() {
     };
     let (steps, _) = run_plan(&root, &cspin_weights());
     assert!(steps.contains(&(Piece::T, Spin::Full, 3)), "TST を撃っていない: {steps:?}");
+}
+
+// ---------------- 序盤(2026-11-01。TD系テンプレか素の状態) ----------------
+//
+// 【2026-11-01・ユーザー】「いきなりRENを組むのは対策されると弱いので、序盤はTDテンプレか素の状態をランダムで選ぶ」。
+
+fn run8_weights() -> Weights {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/weights/ren_tuned_run8.toml");
+    toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+fn pieces(text: &str) -> Vec<Piece> {
+    text.chars().map(|c| Piece::from_char(c).unwrap()).collect()
+}
+
+/// テンプレを選んだら、6種どれでも、読み筋の手がすべて図どおり(図のマスへ図と同じミノを置く)になる。
+/// ミノ順は、見えている7個すべてを図どおりに置けるものを選ぶ。
+#[test]
+fn テンプレを選ぶと図どおりに組む() {
+    use tetrisai_engine::opening::td_templates;
+    let rules = Rules::ppt2();
+    let queues = ["LJOSZTI", "TIOLJSZ", "JZITOLS", "SZOITLJ", "IOTLJSZ", "OSZJLIT", "JLSZOIT", "ZSLJTOI"];
+    for template in td_templates() {
+        let queue = queues
+            .iter()
+            .map(|q| pieces(q))
+            .find(|q| template.buildable(q, None, &rules))
+            .unwrap_or_else(|| panic!("{} を組めるミノ順が無い", template.name));
+        let root = Root { queue: queue.clone(), opening: Opening::Template(template.clone()), ..Default::default() };
+        let options = SearchOptions { width: 256, max_depth: 6, speculate: false };
+        let r = search(&root, &options, &run8_weights(), &rules, &|| false).unwrap();
+        let mut board = root.state.board;
+        for m in &r.plan {
+            assert!(
+                template.accepts(&board, &m.placement.location),
+                "{} の図から外れた(ミノ順 {queue:?}): {:?}
+{}",
+                template.name,
+                m.placement,
+                board_text(&board)
+            );
+            board.place(&m.placement.location);
+        }
+    }
+}
+
+/// 中あけ REN を状況で選ぶ重み(run8)でも、素の状態の序盤では中あけを作らない。
+/// (序盤の作戦が無いと、このミノ順では空の盤面からすぐ種3の中あけを積み始める)
+#[test]
+fn 素の状態の序盤では中あけを作らない() {
+    for queue in ["SZOITLJ", "JZITOLS", "LJOSZTI"] {
+        let root = Root { queue: pieces(queue), opening: Opening::Plain, ..Default::default() };
+        let (steps, end) = run_plan(&root, &run8_weights());
+        assert_eq!(tetrisai_engine::shape::ren_rows(&end.board), 0, "{queue}: {steps:?}\n{}", board_text(&end.board));
+    }
 }

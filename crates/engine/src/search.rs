@@ -22,6 +22,7 @@
 
 use std::collections::HashMap;
 
+use crate::opening::Opening;
 use crate::eval::{
     battle_value, evaluate, opponent_threat, reward, BattleContext, EvalContext, Garbage, Weights,
 };
@@ -62,6 +63,8 @@ pub struct Root {
     pub gauge: u32,
     /// 相手の情報。無ければ相手を見ずに読む
     pub opponent: Option<Opponent>,
+    /// 序盤の作戦(テンプレか素の状態。bot・対戦シミュレーターが `OpeningTracker` で選ぶ)
+    pub opening: Opening,
 }
 
 impl Root {
@@ -147,7 +150,7 @@ pub struct SearchResult {
 const LOCK_OUT_Y: i8 = 20;
 
 /// 同じ局面をまとめるための鍵(盤面・HOLD・次のミノの位置・B2B・REN・予告の片付いた量・せり上がった量・届く攻撃)。
-type NodeKey = (Board, Option<Piece>, usize, bool, u32, u32, u32, u32);
+type NodeKey = (Board, Option<Piece>, usize, bool, u32, u32, u32, u32, bool);
 
 struct Node {
     state: PlayerState,
@@ -168,6 +171,8 @@ struct Node {
     risen: u32,
     /// 相手に届く攻撃(相殺に使った分を除く)の合計。
     outgoing: u32,
+    /// 序盤のテンプレの図どおりに置き続けているか(外れるかラインを消すと false)。
+    on_template: bool,
 }
 
 /// 1手置いた後の予告の状態 (consumed, risen)。`depth` はこの手が何手目か(0 から)。
@@ -235,6 +240,7 @@ pub fn search(
         consumed: 0,
         risen: 0,
         outgoing: 0,
+        on_template: matches!(root.opening, Opening::Template(_)),
     }]];
     let incoming_total: u32 = root.incoming.iter().map(|g| g.lines).sum();
     let battle = BattleContext {
@@ -282,7 +288,15 @@ pub fn search(
                     }
                     let mut state = parent.state;
                     let result = state.apply(&mv.placement, rules);
-                    let r = parent.reward + reward(weights, rules, mv, &result);
+                    let mut r = parent.reward + reward(weights, rules, mv, &result);
+                    // 序盤のテンプレ: 図どおりの手に加点する。ラインを消したら(撃ったら)テンプレは終わり
+                    let mut on_template = false;
+                    if let (true, Opening::Template(t)) = (parent.on_template, &root.opening) {
+                        if t.accepts(&parent.state.board, &mv.placement.location) {
+                            r += weights.template_piece;
+                            on_template = result.lines == 0;
+                        }
+                    }
                     let t_known = hold.map_or(0, |h| (h == Piece::T) as usize)
                         + root.queue[next.min(root.queue.len())..].iter().filter(|&&p| p == Piece::T).count();
                     let t_available = t_known.clamp(1, 2);
@@ -299,7 +313,12 @@ pub fn search(
                     let cancelled_now = if result.lines > 0 { consumed - parent.consumed } else { 0 };
                     let outgoing = parent.outgoing + result.attack - cancelled_now;
                     let our_top = state.board.max_height() + risen + pending;
-                    let ctx = EvalContext { t_available, garbage, consecutive_clears: state.consecutive_clears };
+                    let ctx = EvalContext {
+                        t_available,
+                        garbage,
+                        consecutive_clears: state.consecutive_clears,
+                        opening: root.opening.is_active(),
+                    };
                     let score = r
                         + evaluate(weights, rules, &state.board, state.back_to_back, &ctx)
                         + battle_value(weights, &battle, outgoing, our_top);
@@ -318,9 +337,19 @@ pub fn search(
                         consumed,
                         risen,
                         outgoing,
+                        on_template,
                     };
-                    let key =
-                        (state.board, hold, next, state.back_to_back, state.consecutive_clears, consumed, risen, outgoing);
+                    let key = (
+                        state.board,
+                        hold,
+                        next,
+                        state.back_to_back,
+                        state.consecutive_clears,
+                        consumed,
+                        risen,
+                        outgoing,
+                        on_template,
+                    );
                     match seen.get(&key) {
                         Some(&i) if children[i].score >= score => {}
                         Some(&i) => children[i] = child,
@@ -390,7 +419,12 @@ pub fn search(
                         let cancelled_now = if result.lines > 0 { consumed - node.consumed } else { 0 };
                         let outgoing = node.outgoing + result.attack - cancelled_now;
                         let our_top = state.board.max_height() + risen + pending;
-                        let ctx = EvalContext { t_available: 1, garbage, consecutive_clears: state.consecutive_clears };
+                        let ctx = EvalContext {
+                            t_available: 1,
+                            garbage,
+                            consecutive_clears: state.consecutive_clears,
+                            opening: root.opening.is_active(),
+                        };
                         let s = node.reward
                             + reward(weights, rules, mv, &result)
                             + evaluate(weights, rules, &state.board, state.back_to_back, &ctx)

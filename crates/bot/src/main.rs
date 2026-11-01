@@ -23,6 +23,7 @@
 //!   読めない・形式が違う・知らない項目がある重みは、理由を標準エラーに書いて終了する(終了コード 2)。
 //!   以前は既定の重みで動き続けたため、別の重みで動いていることに気づけなかった
 //! - `--max-width <数>`: 探索の幅の上限(既定 1024)
+//! - `--no-opening`: 序盤の作戦(TD系テンプレか素の状態を対局ごとにランダムで選ぶ。設計書 8.10)を使わない
 //! - `--speculate`: 見えているミノの先を1手予測して読む(計算が6〜7割増える。同じ幅では勝率57%で
 //!   はっきりした差が出なかったので既定では使わない。設計書 8.4)
 
@@ -34,7 +35,7 @@ use std::time::Instant;
 
 use serde_json::{json, Value};
 use tetrisai_core::{Board, Piece, Placement, PlayerState, Rules};
-use tetrisai_engine::{search, IncomingGarbage, Opponent, Root, SearchOptions, SearchResult, Weights};
+use tetrisai_engine::{search, IncomingGarbage, OpeningTracker, Opponent, Root, SearchOptions, SearchResult, Weights};
 
 const PLAN_LEN: usize = 5;
 const MAX_CANDIDATES: usize = 5;
@@ -83,6 +84,14 @@ fn main() {
     let max_width: usize = arg_value(&args, "--max-width").and_then(|s| s.parse().ok()).unwrap_or(1024);
     let speculate = args.iter().any(|a| a == "--speculate");
     let rules = Rules::ppt2();
+    // 【2026-11-01・ユーザー】序盤は TD系テンプレか素の状態をランダムで選ぶ(空の盤面を受け取るたびに選び直す)
+    let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
+    let mut opening = (!args.iter().any(|a| a == "--no-opening")).then(|| OpeningTracker::new(seed));
+    let mut observe = |root: &mut Root| {
+        if let Some(tracker) = opening.as_mut() {
+            root.opening = tracker.observe(root, &rules);
+        }
+    };
 
     let bot = Arc::new(Bot { shared: Mutex::new(Shared::default()), wake: Condvar::new(), generation: AtomicU64::new(0) });
     {
@@ -120,7 +129,8 @@ fn main() {
         match msg["type"].as_str().unwrap_or("") {
             "rules" => send(json!({"type": "ready"})),
             "start" => match parse_start(&msg) {
-                Some(root) => {
+                Some(mut root) => {
+                    observe(&mut root);
                     let mut s = bot.shared.lock().unwrap();
                     s.pending_start = root.queue.is_empty();
                     s.root = Some(root);
@@ -134,6 +144,7 @@ fn main() {
                     let mut s = bot.shared.lock().unwrap();
                     if let Some(root) = s.root.as_mut() {
                         root.push_piece(piece);
+                        observe(root);
                         s.pending_start = false;
                         // それまでの最善手は同じ局面のものなので残しておく(新しい探索で置き換わる)
                         bot.bump(&mut s);
@@ -148,6 +159,7 @@ fn main() {
                         if !root.play(&placement, &rules) {
                             eprintln!("play の手のミノが操作ミノ・HOLD のどちらでもない: {line}");
                         }
+                        observe(root);
                     }
                     s.best = None;
                     bot.bump(&mut s);

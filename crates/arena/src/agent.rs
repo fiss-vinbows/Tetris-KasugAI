@@ -3,7 +3,7 @@
 use std::io;
 
 use tetrisai_core::{Piece, Placement, PlayerState, Rules};
-use tetrisai_engine::{search, IncomingGarbage, Opponent, Root, SearchOptions, Weights};
+use tetrisai_engine::{search, IncomingGarbage, OpeningTracker, Opponent, Root, SearchOptions, Weights};
 
 use crate::battle::{Incoming, Player};
 
@@ -75,6 +75,8 @@ pub struct EngineAgent {
     pub use_opponent: bool,
     /// 見えているミノの先を1手だけ予測して読むか
     pub speculate: bool,
+    /// 序盤の作戦(TD系テンプレか素の状態をランダムで選ぶ)。None なら使わない
+    pub opening: Option<OpeningTracker>,
     root: Option<Root>,
 }
 
@@ -88,7 +90,17 @@ impl EngineAgent {
             use_incoming: true,
             use_opponent: true,
             speculate: false,
+            opening: None,
             root: None,
+        }
+    }
+}
+
+impl EngineAgent {
+    /// 局面が変わったら、序盤の作戦を選ぶ・進める・終える。
+    fn observe_opening(&mut self) {
+        if let (Some(tracker), Some(root)) = (self.opening.as_mut(), self.root.as_mut()) {
+            root.opening = tracker.observe(root, &self.rules);
         }
     }
 }
@@ -105,6 +117,7 @@ impl Agent for EngineAgent {
             bag,
             ..Default::default()
         });
+        self.observe_opening();
         Ok(())
     }
 
@@ -133,6 +146,7 @@ impl Agent for EngineAgent {
                 root.push_piece(p);
             }
         }
+        self.observe_opening();
         Ok(())
     }
 

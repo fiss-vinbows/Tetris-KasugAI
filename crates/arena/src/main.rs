@@ -17,6 +17,8 @@
 //!   --a-no-incoming / --b-no-incoming  --a-weights / --b-weights の側に予告を教えない(比較実験用)
 //!   --a-no-opponent / --b-no-opponent  --a-weights / --b-weights の側に相手の情報を教えない(比較実験用)
 //!   --a-speculate / --b-speculate      --a-weights / --b-weights の側で、見えているミノの先を予測して読む
+//!   --a-no-opening / --b-no-opening    --a-weights / --b-weights の側で序盤の作戦(TD系テンプレか素の状態を
+//!                       ランダムで選ぶ。設計書 8.10)を使わない
 //!   --record <file>     1局ごとの結果を JSON Lines で書き出す
 //!   --adjudicate        手数の上限に達したら危なさ(高さ + 予告)の小さいほうを勝ちにする(同じAI同士の比較用)
 
@@ -33,24 +35,34 @@ use tetrisai_arena::battle::{Loss, Stats};
 use tetrisai_arena::game::{play_game, GameConfig, GameResult};
 use tetrisai_arena::tbp::TbpBot;
 use tetrisai_core::Rules;
-use tetrisai_engine::Weights;
+use tetrisai_engine::{OpeningTracker, Weights};
 
 enum Engine {
     /// TBP の bot プロセス
     Tbp { exe: PathBuf, args: Vec<String> },
     /// このAIの探索を直接呼ぶ
-    InProcess { weights: Weights, label: String, width: usize, use_incoming: bool, use_opponent: bool, speculate: bool },
+    InProcess {
+        weights: Weights,
+        label: String,
+        width: usize,
+        use_incoming: bool,
+        use_opponent: bool,
+        speculate: bool,
+        opening: bool,
+    },
 }
 
 impl Engine {
-    fn create(&self, rules: &Rules) -> Box<dyn Agent + Send> {
+    /// `seed` は序盤の作戦を選ぶ乱数の種。
+    fn create(&self, rules: &Rules, seed: u64) -> Box<dyn Agent + Send> {
         match self {
             Engine::Tbp { exe, args } => Box::new(TbpBot::spawn(exe, args).expect("bot を起動できない")),
-            Engine::InProcess { weights, label, width, use_incoming, use_opponent, speculate } => {
+            Engine::InProcess { weights, label, width, use_incoming, use_opponent, speculate, opening } => {
                 let mut agent = EngineAgent::new(weights.clone(), rules.clone(), *width, label);
                 agent.use_incoming = *use_incoming;
                 agent.use_opponent = *use_opponent;
                 agent.speculate = *speculate;
+                agent.opening = opening.then(|| OpeningTracker::new(seed));
                 Box::new(agent)
             }
         }
@@ -81,6 +93,7 @@ fn main() {
             let stem = Path::new(&path).file_stem().map_or(path.clone(), |s| s.to_string_lossy().into_owned());
             let speculate = args.iter().any(|a| *a == format!("--{side}-speculate"));
             let use_opponent = !args.iter().any(|a| *a == format!("--{side}-no-opponent"));
+            let opening = !args.iter().any(|a| *a == format!("--{side}-no-opening"));
             let mut label = stem;
             if !use_incoming {
                 label += "(予告なし)";
@@ -91,7 +104,10 @@ fn main() {
             if speculate {
                 label += "(予測)";
             }
-            Engine::InProcess { weights: load_weights(&path), label, width, use_incoming, use_opponent, speculate }
+            if !opening {
+                label += "(序盤なし)";
+            }
+            Engine::InProcess { weights: load_weights(&path), label, width, use_incoming, use_opponent, speculate, opening }
         }
         None => {
             let exe = get(&format!("--{side}")).map(PathBuf::from).unwrap_or(default);
@@ -121,8 +137,8 @@ fn main() {
     let mut handles = Vec::new();
     for t in 0..threads {
         let (next, tx, engines, config) = (next.clone(), tx.clone(), engines.clone(), config.clone());
-        let mut a = engines[0].create(&config.rules);
-        let mut b = engines[1].create(&config.rules);
+        let mut a = engines[0].create(&config.rules, first_seed * 1000 + t * 2 + 1);
+        let mut b = engines[1].create(&config.rules, first_seed * 1000 + t * 2 + 2);
         if t == 0 {
             names = [a.name(), b.name()];
         }

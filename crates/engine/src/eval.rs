@@ -104,6 +104,12 @@ pub struct Weights {
     /// C-spin(TST の溝に T を入れて3行消した後に TSD の溝ができる形)1つあたり(1つまで)。
     /// 名前の由来(鎹を逆向きにした形)どおり、TST → TSD を組む形を積極的に目指させる
     pub c_spin: f32,
+
+    // ---- 序盤(2026-11-01。opening.rs) ----
+    /// 序盤にテンプレを選んだとき、図どおりの手(図のマスへ図と同じミノを置く)1手あたり。
+    /// 自動調整はしない(序盤の作戦はランダムに選ぶので、勝敗から重みを決めにくい)。8 にすると、テンプレを選んだ対局の
+    /// 約84%でテンプレの Tスピンを撃てる(4 では約74%、12 でも8と同じ。設計書 8.10)
+    pub template_piece: f32,
 }
 
 /// 盤面の評価に渡す、局面ごとの値。
@@ -115,6 +121,8 @@ pub struct EvalContext {
     pub garbage: Garbage,
     /// この局面の REN の状態(続けて消した回数。0 なら REN 中でない)
     pub consecutive_clears: u32,
+    /// 序盤(テンプレか素の状態)か。序盤は中あけ REN を組まない(中あけの項目を使わない)
+    pub opening: bool,
 }
 
 /// 相手の情報から作る、評価に使う値(探索の最初に1回だけ計算する)。
@@ -177,6 +185,7 @@ impl Default for Weights {
             soft_drop_rows: 0.0,
             tst_slot: 0.0,
             c_spin: 0.0,
+            template_piece: 8.0,
         }
     }
 }
@@ -226,21 +235,9 @@ pub fn evaluate(w: &Weights, rules: &Rules, board: &Board, back_to_back: bool, c
     if w.tsd_slot_any != 0.0 {
         e += w.tsd_slot_any * shape::tsd_slots(board).len().min(2) as f32;
     }
-    if w.center_well_rows != 0.0 || w.center_well_side_diff != 0.0 {
-        let rows = shape::center_well_rows(board);
-        if rows > 0 {
-            e += w.center_well_rows * rows as f32;
-            e += w.center_well_side_diff * shape::center_well_side_diff(board) as f32;
-        }
-    }
-    if w.air_tsd_slot != 0.0 {
-        e += w.air_tsd_slot * shape::has_air_tsd(board).min(1) as f32;
-    }
-    if w.center_well_seed != 0.0 && shape::center_well_seed(board) == 3 {
-        e += w.center_well_seed;
-    }
-    if w.ren_potential != 0.0 {
-        e += w.ren_potential * ren_potential(rules, board, ctx.consecutive_clears) as f32;
+    // 【2026-11-01・ユーザー】いきなり REN を組むのは対策されると弱いので、序盤は中あけの項目を使わない
+    if !ctx.opening {
+        e += center_well_value(w, rules, board, ctx);
     }
     if w.pc_chance != 0.0 && shape::pc_possible(board) {
         e += w.pc_chance;
@@ -311,6 +308,28 @@ pub fn evaluate(w: &Weights, rules: &Rules, board: &Board, back_to_back: bool, c
     }
     e += w.row_transitions * transitions as f32;
 
+    e
+}
+
+/// 中あけの項目(中あけの行・左右の差・空中TSD・種3・貯めた REN の火力)。
+fn center_well_value(w: &Weights, rules: &Rules, board: &Board, ctx: &EvalContext) -> f32 {
+    let mut e = 0.0;
+    if w.center_well_rows != 0.0 || w.center_well_side_diff != 0.0 {
+        let rows = shape::center_well_rows(board);
+        if rows > 0 {
+            e += w.center_well_rows * rows as f32;
+            e += w.center_well_side_diff * shape::center_well_side_diff(board) as f32;
+        }
+    }
+    if w.air_tsd_slot != 0.0 {
+        e += w.air_tsd_slot * shape::has_air_tsd(board).min(1) as f32;
+    }
+    if w.center_well_seed != 0.0 && shape::center_well_seed(board) == 3 {
+        e += w.center_well_seed;
+    }
+    if w.ren_potential != 0.0 {
+        e += w.ren_potential * ren_potential(rules, board, ctx.consecutive_clears) as f32;
+    }
     e
 }
 
