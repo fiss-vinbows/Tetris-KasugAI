@@ -19,7 +19,9 @@
 //!
 //! 起動引数:
 //! - `--config <ファイル>`: 評価の重み。`.json` は Cold Clear 2 の設定(`freestyle_weights`)、
-//!   `.toml` はこのAIの重み。TBA は `config/cold_clear_beginner.json` を渡してくる
+//!   `.toml` はこのAIの重み。TBA は `config/cold_clear_beginner.json` を渡してくる。
+//!   読めない・形式が違う・知らない項目がある重みは、理由を標準エラーに書いて終了する(終了コード 2)。
+//!   以前は既定の重みで動き続けたため、別の重みで動いていることに気づけなかった
 //! - `--max-width <数>`: 探索の幅の上限(既定 1024)
 //! - `--speculate`: 見えているミノの先を1手予測して読む(計算が6〜7割増える。同じ幅では勝率57%で
 //!   はっきりした差が出なかったので既定では使わない。設計書 8.4)
@@ -74,7 +76,10 @@ impl Bot {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let weights = load_weights(arg_value(&args, "--config"));
+    let weights = load_weights(arg_value(&args, "--config")).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(2);
+    });
     let max_width: usize = arg_value(&args, "--max-width").and_then(|s| s.parse().ok()).unwrap_or(1024);
     let speculate = args.iter().any(|a| a == "--speculate");
     let rules = Rules::ppt2();
@@ -308,16 +313,13 @@ fn arg_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(|s| s.as_str())
 }
 
-/// 評価の重みを読む。読めなければ既定値を使う(TBA から起動されたときに止まらないように)。
-fn load_weights(path: Option<&str>) -> Weights {
-    let Some(path) = path else { return Weights::default() };
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("重みのファイルを読めないので既定値を使う: {path}: {e}");
-            return Weights::default();
-        }
-    };
+/// 評価の重みを読む。指定が無ければ既定値。
+///
+/// 【2026-11-01・ユーザーの指示】読めない・形式が違う・知らない項目がある重みはエラーにする(呼び出し側で終了する)。
+/// 以前は既定値で動き続けたため、TBA から見ると別の重みで動いていることに気づけなかった。
+fn load_weights(path: Option<&str>) -> Result<Weights, String> {
+    let Some(path) = path else { return Ok(Weights::default()) };
+    let text = std::fs::read_to_string(path).map_err(|e| format!("重みのファイルを読めません: {path}: {e}"))?;
     let parsed = if Path::new(path).extension().is_some_and(|e| e == "json") {
         serde_json::from_str::<Value>(&text).map_err(|e| e.to_string()).and_then(|v| {
             // Cold Clear 2 の設定ファイルなら freestyle_weights の中が重み
@@ -327,9 +329,8 @@ fn load_weights(path: Option<&str>) -> Weights {
     } else {
         toml::from_str::<Weights>(&text).map_err(|e| e.to_string())
     };
-    parsed.unwrap_or_else(|e| {
-        eprintln!("重みのファイルの形式が違うので既定値を使う: {path}: {e}");
-        Weights::default()
+    parsed.map_err(|e| {
+        format!("重みのファイルの形式が違うか、この実行ファイルが知らない項目があります(古い実行ファイルなら作り直してください): {path}: {e}")
     })
 }
 
@@ -378,8 +379,26 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("cc2.json");
         std::fs::write(&path, r#"{"freestyle_weights": {"holes": -3.0}, "freestyle_exploitation": 0.69}"#).unwrap();
-        let w = load_weights(path.to_str());
+        let w = load_weights(path.to_str()).unwrap();
         assert_eq!(w.holes, -3.0);
         assert_eq!(w.height, Weights::default().height);
+    }
+
+    #[test]
+    fn 重みに問題があれば既定値で動かさずエラーにする() {
+        let dir = std::env::temp_dir().join("tetrisai-bot-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 知らない項目(古い実行ファイル・書き間違い)
+        let unknown = dir.join("unknown.toml");
+        std::fs::write(&unknown, "holes = -1.0\ncenter_well_rowz = 3.0\n").unwrap();
+        let err = load_weights(unknown.to_str()).unwrap_err();
+        assert!(err.contains("center_well_rowz"), "{err}");
+        // 形式が違う・ファイルが無い
+        let broken = dir.join("broken.toml");
+        std::fs::write(&broken, "holes = \n").unwrap();
+        assert!(load_weights(broken.to_str()).is_err());
+        assert!(load_weights(dir.join("no-such.toml").to_str()).is_err());
+        // 指定が無ければ既定値
+        assert_eq!(load_weights(None).unwrap(), Weights::default());
     }
 }

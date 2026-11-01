@@ -191,6 +191,67 @@ fn 試験用の重みは低い偶数の盤面でパフェを取る() {
     assert!(end.board.is_empty(), "パフェを取っていない: {steps:?}");
 }
 
+// ---------------- 種3の中あけ REN(2026-11-01。重み m5_seed3.toml) ----------------
+
+fn seed3_weights() -> Weights {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/weights/m5_seed3.toml");
+    toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+fn board_text(board: &Board) -> String {
+    board.to_rows().join("\n")
+}
+
+/// 実機で種0のまま天井まで積み、REN を撃てなかった(ユーザー「種3の概念が理解できておらず種0になっている」)。
+/// 対局の始め(空の盤面)から、中央4列の底に種3を置いて左右を積む。
+/// 左右が埋まった後の中あけでは、ミノは中央に4マスずつ入り消える行も中央の4マスを消すので、中央のマス数の
+/// 4で割った余りは変わらない(種0から種3にはできない)。種は左右がまだ埋まっていない対局の始めに作るしかない。
+#[test]
+fn 種3を置いて中あけを積む() {
+    for queue in [
+        [Piece::L, Piece::J, Piece::O, Piece::S, Piece::Z, Piece::T],
+        [Piece::T, Piece::I, Piece::O, Piece::L, Piece::J, Piece::S],
+        [Piece::J, Piece::Z, Piece::I, Piece::T, Piece::O, Piece::L],
+        [Piece::S, Piece::Z, Piece::O, Piece::I, Piece::T, Piece::L],
+    ] {
+        let root = Root { state: PlayerState::new(Board::default()), queue: queue.to_vec(), ..Default::default() };
+        let (steps, end) = run_plan(&root, &seed3_weights());
+        let seed = tetrisai_engine::shape::center_well_seed(&end.board);
+        assert_eq!(seed, 3, "種3になっていない {queue:?}: {steps:?}\n{}", board_text(&end.board));
+        assert!(steps.iter().all(|&(_, _, lines)| lines == 0), "積む途中で消した {queue:?}: {steps:?}");
+    }
+}
+
+/// 左右を上限(18段)まで積んだら、中あけにミノを入れて REN を撃ち続ける。
+#[test]
+fn 積み上げたら種3からrenを撃つ() {
+    let mut rows = vec!["###....###"; 17];
+    rows.push("###.######"); // 種3
+    let root = Root {
+        state: PlayerState::new(Board::from_rows(&rows)),
+        queue: vec![Piece::I, Piece::O, Piece::T, Piece::L, Piece::J, Piece::S],
+        ..Default::default()
+    };
+    let (steps, _end) = run_plan(&root, &seed3_weights());
+    let ren = steps.iter().take_while(|&&(_, _, lines)| lines > 0).count();
+    assert!(ren >= 5, "REN を撃ち続けていない(続いたのは {ren} 手): {steps:?}");
+}
+
+/// 上限より低いうちは撃たずに積み続ける(可能な限り積み上げる)。
+#[test]
+fn 上限より低いうちは種3を残して積む() {
+    let mut rows = vec!["###....###"; 9];
+    rows.push("###.######");
+    let root = Root {
+        state: PlayerState::new(Board::from_rows(&rows)),
+        queue: vec![Piece::I, Piece::O, Piece::T, Piece::L, Piece::J, Piece::S],
+        ..Default::default()
+    };
+    let (steps, end) = run_plan(&root, &seed3_weights());
+    assert!(steps.iter().all(|&(_, _, lines)| lines == 0), "撃ってしまった: {steps:?}");
+    assert_eq!(tetrisai_engine::shape::center_well_seed(&end.board), 3, "{}", board_text(&end.board));
+}
+
 // ---------------- C-spin(暫定。試験用の重み) ----------------
 
 fn cspin_weights() -> Weights {

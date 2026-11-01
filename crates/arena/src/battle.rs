@@ -89,6 +89,8 @@ pub struct Stats {
     pub max_ren: u32,
     /// ソフトドロップが必要だった手の数
     pub soft_drop_moves: u32,
+    /// ラインを消した手の数(実機ではライン消去の演出 約0.7秒を待つ。2026-11-01 全自動の速さの比較用)
+    pub clear_moves: u32,
 }
 
 /// 1手置いた結果。
@@ -237,6 +239,7 @@ impl Player {
         s.back_to_backs += result.back_to_back as u32;
         s.perfect_clears += result.perfect_clear as u32;
         s.soft_drop_moves += (mv.soft_drop_sections > 0) as u32;
+        s.clear_moves += (result.lines > 0) as u32;
         match (result.spin, result.lines) {
             (Spin::None, 4) => s.tetrises += 1,
             (Spin::Full, 1) => s.tspin_singles += 1,

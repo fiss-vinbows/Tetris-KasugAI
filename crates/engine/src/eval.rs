@@ -7,6 +7,9 @@
 //! 項目名と既定値は Cold Clear 2 の default.json に合わせてある。CC2 用の設定 JSON
 //! (TBA の config/cold_clear_beginner.json など)の `freestyle_weights` をそのまま読める。
 //! 独自の項目(`soft_drop_section` など)は CC2 の設定には無いので既定値を使う。
+//!
+//! 知らない項目はエラーにする(2026-11-01)。黙って無視すると、古い実行ファイルに新しい項目入りの重みを
+//! 渡しても気づけない(TBA の bot が M5 より前のままで、中あけの重みが効いていなかった)。書き間違いも同じ。
 
 use serde::{Deserialize, Serialize};
 use tetrisai_core::board::WIDTH;
@@ -15,7 +18,7 @@ use crate::shape;
 use tetrisai_core::{Board, ClearResult, Move, Piece, PieceLocation, Rotation, Rules, Spin};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Weights {
     // ---- 盤面の評価 ----
     /// 穴の上に被さっているマスの数(穴ごとに `max_cell_covered_height` まで数える)
@@ -80,6 +83,12 @@ pub struct Weights {
     pub air_tsd_slot: f32,
     /// 中あけ積みを始める高さ(探索の出発点の盤面がこの段数以下か、すでに中あけが2行以上あれば中あけ積み)
     pub center_well_start_height: f32,
+    /// 中あけの底に種3(中央4列の3マス)がある。中あけ積みのときだけ効く(2026-11-01。種0のまま積んで REN を
+    /// 撃てなかったため)
+    pub center_well_seed: f32,
+    /// 中あけ積みをやめて REN を撃ち始める高さ(探索の出発点の盤面がこの段数以上なら中あけ積みをしない)。
+    /// REN が続いている間(出発点で REN 中)も中あけ積みに戻らず撃ち続ける。0 ならこの条件は使わない(2026-11-01)
+    pub center_well_fire_height: f32,
     /// TSD の溝(空中のものを含む、一般的な形)1つあたり(2つまで)。`tslot` は CC2 と同じ単純な形しか見ない
     pub tsd_slot_any: f32,
     /// 中盤のパフェの見込みがある形(埋まりマスが偶数・穴なし・4段以内でそろえられる)
@@ -160,6 +169,8 @@ impl Default for Weights {
             center_well_side_diff: 0.0,
             air_tsd_slot: 0.0,
             center_well_start_height: 5.0,
+            center_well_seed: 0.0,
+            center_well_fire_height: 0.0,
             tsd_slot_any: 0.0,
             pc_chance: 0.0,
             soft_drop_rows: 0.0,
@@ -202,10 +213,18 @@ pub fn reward(w: &Weights, rules: &Rules, mv: &Move, result: &ClearResult) -> f3
     r
 }
 
-/// 中あけ積みの作戦をとるか(探索の出発点の盤面で1回だけ決める)。中あけの重みが0なら、とらない。
-pub fn center_well_mode(w: &Weights, board: &Board) -> bool {
-    w.center_well_rows != 0.0
-        && (board.max_height() as f32 <= w.center_well_start_height || shape::center_well_rows(board) >= 2)
+/// 中あけ積みの作戦をとるか(探索の出発点の局面で1回だけ決める)。中あけの重みが0なら、とらない。
+///
+/// `consecutive_clears` は出発点の REN の状態(0 なら REN 中でない)。【2026-11-01・ユーザー】中あけは積めるだけ
+/// 積んでから REN を撃つ: `center_well_fire_height` 以上の高さか、REN を撃っている途中なら中あけ積みをしない
+/// (通常の評価で、高さを下げるために中あけへミノを入れて REN を続ける)。
+pub fn center_well_mode(w: &Weights, board: &Board, consecutive_clears: u32) -> bool {
+    if w.center_well_rows == 0.0 {
+        return false;
+    }
+    let firing = consecutive_clears > 0
+        || w.center_well_fire_height > 0.0 && board.max_height() as f32 >= w.center_well_fire_height;
+    !firing && (board.max_height() as f32 <= w.center_well_start_height || shape::center_well_rows(board) >= 2)
 }
 
 /// 盤面の評価。
@@ -224,6 +243,9 @@ pub fn evaluate(w: &Weights, board: &Board, back_to_back: bool, ctx: &EvalContex
         e += w.center_well_rows * shape::center_well_rows(board) as f32;
         e += w.center_well_side_diff * shape::center_well_side_diff(board) as f32;
         e += w.air_tsd_slot * shape::has_air_tsd(board).min(1) as f32;
+        if w.center_well_seed != 0.0 && shape::center_well_seed(board) == 3 {
+            e += w.center_well_seed;
+        }
     }
     if w.pc_chance != 0.0 && shape::pc_possible(board) {
         e += w.pc_chance;
@@ -446,7 +468,7 @@ mod tests {
         // 中あけ・空中TSD・パフェの見込みがそろった盤面でも、既定の重みでは中あけ積みにならず点も変わらない
         let w = Weights::default();
         let board = Board::from_rows(&["##........", "###....###", "###....###"]);
-        assert!(!center_well_mode(&w, &board));
+        assert!(!center_well_mode(&w, &board, 0));
         let off = EvalContext { t_available: 1, ..Default::default() };
         let on = EvalContext { center_well: true, ..off };
         assert_eq!(evaluate(&w, &board, false, &off), evaluate(&w, &board, false, &on));
@@ -456,12 +478,42 @@ mod tests {
     fn 中あけ積みの評価() {
         let w = Weights { center_well_rows: 1.0, center_well_side_diff: -0.5, ..Weights::default() };
         let well = Board::from_rows(&["###....###", "###....###"]);
-        assert!(center_well_mode(&w, &well));
+        assert!(center_well_mode(&w, &well, 0));
         let ctx = EvalContext { t_available: 1, center_well: true, ..Default::default() };
         let base = evaluate(&Weights::default(), &well, false, &ctx);
         assert!((evaluate(&w, &well, false, &ctx) - base - 2.0).abs() < 1e-4, "中あけ2行で +2");
         // 高い盤面で中あけが無ければ、中あけ積みの作戦はとらない
-        assert!(!center_well_mode(&w, &Board::from_rows(&["#########."; 8])));
+        assert!(!center_well_mode(&w, &Board::from_rows(&["#########."; 8]), 0));
+    }
+
+    #[test]
+    fn 積み上げたら中あけ積みをやめてrenを撃つ() {
+        // 【2026-11-01・ユーザー】可能な限り積み上げてから撃つ。撃ち始めたら REN が続く間は中あけ積みに戻らない
+        let w = Weights { center_well_rows: 1.0, center_well_fire_height: 6.0, ..Weights::default() };
+        assert!(center_well_mode(&w, &Board::from_rows(&["###....###"; 5]), 0), "5段: まだ積む");
+        assert!(!center_well_mode(&w, &Board::from_rows(&["###....###"; 6]), 0), "6段: 撃つ");
+        assert!(!center_well_mode(&w, &Board::from_rows(&["###....###"; 5]), 2), "REN 中は撃ち続ける");
+        // 0 なら高さでは撃たない(今までどおり)
+        let never = Weights { center_well_fire_height: 0.0, ..w };
+        assert!(center_well_mode(&never, &Board::from_rows(&["###....###"; 18]), 0));
+    }
+
+    #[test]
+    fn 種3の加点() {
+        let w = Weights { center_well_rows: 1.0, center_well_seed: 4.0, ..Weights::default() };
+        let ctx = EvalContext { t_available: 1, center_well: true, ..Default::default() };
+        let gain = |rows: &[&str]| {
+            let b = Board::from_rows(rows);
+            evaluate(&w, &b, false, &ctx) - evaluate(&Weights { center_well_seed: 0.0, ..w.clone() }, &b, false, &ctx)
+        };
+        assert!((gain(&["###....###", "###.######"]) - 4.0).abs() < 1e-4, "種3(1行)");
+        assert!((gain(&["###....###", "###.#..###", "#####..###"]) - 4.0).abs() < 1e-4, "種3(2行にまたがる)");
+        assert!(gain(&["###....###", "###....###"]).abs() < 1e-4, "種0");
+        assert!(gain(&["###....###", "###..#.###", "###.######"]).abs() < 1e-4, "種4");
+        // 中あけ積みでないときは効かない
+        let b = Board::from_rows(&["###....###", "###.######"]);
+        let off = EvalContext { center_well: false, ..ctx };
+        assert_eq!(evaluate(&w, &b, false, &off), evaluate(&Weights { center_well_seed: 0.0, ..w.clone() }, &b, false, &off));
     }
 
     #[test]
@@ -500,5 +552,28 @@ mod tests {
         assert_eq!(w.holes, -2.0);
         assert_eq!(w.tslot, [0.0, 1.0, 2.0, 3.0]);
         assert_eq!(w.soft_drop_section, Weights::default().soft_drop_section);
+    }
+
+    #[test]
+    fn 知らない項目はエラーにする() {
+        // 古い実行ファイルに新しい項目入りの重みを渡したとき・書き間違えたときに、黙って無視しない
+        let err = toml::from_str::<Weights>("holes = -1.0\ncenter_wel_rows = 3.0\n").unwrap_err().to_string();
+        assert!(err.contains("center_wel_rows"), "{err}");
+        assert!(serde_json::from_str::<Weights>(r#"{"holes": -1.0, "jeopardy": 1.0}"#).is_err());
+    }
+
+    #[test]
+    fn 置いてある重みのファイルはすべて読める() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/weights");
+        let mut count = 0;
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "toml") {
+                let text = std::fs::read_to_string(&path).unwrap();
+                toml::from_str::<Weights>(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                count += 1;
+            }
+        }
+        assert!(count > 0);
     }
 }

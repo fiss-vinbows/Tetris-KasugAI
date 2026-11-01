@@ -1,0 +1,25 @@
+# 【2026-11-01・TBA全自動の速さ優先(案1)】tuned.toml をもとに、ライン消去の回数(演出 約0.7秒)と
+# ソフトドロップの手(約0.6秒)を減らす: REN・Tスピンの評価を下げ、まとめて消す(テトリス)を上げる
+cell_coveredness = -0.011450256410256411
+max_cell_covered_height = 6
+holes = -1.1053476923076924
+row_transitions = -0.8050487179487179
+height = -0.4428558974358974
+height_upper_half = -0.5067307692307692
+height_upper_quarter = -2.1602338461538464
+tetris_well_depth = 0.3
+tslot = [-0.15688666666666667, 0.3, 0.8, 0.8]
+has_back_to_back = 0.35472
+wasted_t = -0.3
+softdrop = -1.0
+normal_clears = [0.0, -2.5, -2.0, -2.0, 4.0]
+mini_spin_clears = [0.0, 0.0304625641025641, -0.2620415384615385]
+spin_clears = [0.0, 0.0, 1.5, 3.0]
+back_to_back_clear = 1.6694
+combo_attack = 0.3
+perfect_clear = 17.715850256410256
+perfect_clear_override = true
+soft_drop_section = -1.5
+mid_air_stop = -1.5
+pending_garbage = -0.13382410256410257
+overflow = -11.71382

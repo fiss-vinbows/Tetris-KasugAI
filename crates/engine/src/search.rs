@@ -242,7 +242,7 @@ pub fn search(
         opponent_threat: root.opponent.map_or(0, |o| opponent_threat(rules, &o.board, o.gauge, o.back_to_back)),
         gauge: root.gauge,
     };
-    let center_well = center_well_mode(weights, &root.state.board);
+    let center_well = center_well_mode(weights, &root.state.board, root.state.consecutive_clears);
     let mut nodes = 0u64;
     let mut moves = Vec::with_capacity(64);
 

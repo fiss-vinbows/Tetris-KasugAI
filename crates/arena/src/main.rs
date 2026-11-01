@@ -216,7 +216,7 @@ fn summary(names: &[String; 2], results: &[GameResult]) {
 
     println!();
     println!("1局あたりの平均:");
-    let header = ["", "手数", "攻撃", "攻撃/手", "相殺", "送った", "受けた", "テトリス", "TSS", "TSD", "TST", "ミニ", "パフェ", "B2B", "最大REN", "SD手%"];
+    let header = ["", "手数", "攻撃", "攻撃/手", "相殺", "送った", "受けた", "テトリス", "TSS", "TSD", "TST", "ミニ", "パフェ", "B2B", "最大REN", "SD手%", "消去手%"];
     println!("{}", header.iter().map(|h| format!("{h:>8}")).collect::<String>());
     for (side, name) in names.iter().enumerate() {
         let stats: Vec<&Stats> = results.iter().map(|r| &r.stats[side]).collect();
@@ -239,6 +239,7 @@ fn summary(names: &[String; 2], results: &[GameResult]) {
             avg(&|s| s.back_to_backs),
             avg(&|s| s.max_ren),
             100.0 * avg(&|s| s.soft_drop_moves) / pieces.max(1.0),
+            100.0 * avg(&|s| s.clear_moves) / pieces.max(1.0),
         ];
         let label: String = format!("{}:{}", ["A", "B"][side], name).chars().take(8).collect();
         println!("{label:>8}{}", cols.iter().map(|v| format!("{v:>8.2}")).collect::<String>());

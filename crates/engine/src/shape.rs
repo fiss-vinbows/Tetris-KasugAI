@@ -97,6 +97,25 @@ pub fn center_well_rows(board: &Board) -> u32 {
     (0..board.max_height()).filter(|&y| row(board, y) == SIDES).count() as u32
 }
 
+/// 中あけの種(タネ)のマス数: 中央4列が空いた一番下の行より下にある、中央4列のマスの数。
+///
+/// 【2026-11-01・ユーザー】中あけ REN は中央4列の底に3マスの種(種3)を置いてから積む。種があると、中あけに
+/// ミノを入れるたびに1行ずつ消えて REN が続く。種が無い(種0)と最初の1手で消えず、REN が始まらない。
+/// 種は1行に収まらなくてもよい(例: L を寝かせて置くと、下の行に2マス・その上に1マス)。
+/// 左右がまだ埋まっていなくても数える(対局の始めに、左右へまたがるミノで種を作るため。例: I を横にして
+/// 右の列にかけると中央に3マス)。左右が埋まってからでは、中央のマス数の4で割った余りが変わらないので作れない。
+pub fn center_well_seed(board: &Board) -> u32 {
+    let mut seed = 0;
+    for y in 0..=board.max_height() {
+        let center = row(board, y) & CENTER;
+        if center == 0 {
+            break;
+        }
+        seed += center.count_ones();
+    }
+    seed
+}
+
 /// 中あけの左右の高さの差(左3列の一番高いところと、右3列の一番高いところの差)。
 pub fn center_well_side_diff(board: &Board) -> u32 {
     let left = (0..3).map(|x| board.column_height(x)).max().unwrap();
