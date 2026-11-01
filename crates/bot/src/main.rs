@@ -9,6 +9,7 @@
 //!
 //! TBP の拡張(Cold Clear 2 フォークと同じ): `suggestion` に読み筋 `plan`(1手目から最大5手)を付ける。
 //! 独自の拡張: `suggestion` に `difficulty`(`moves` と同じ順の、操作の難しさ)を付ける。
+//! 独自の拡張: `suggestion` に `aim`(狙い筋の文言。改行で2行まで。TBA の情報パネルの「狙い」に出す)を付ける。
 //! 独自の拡張: `incoming` メッセージ(`{"type": "incoming", "garbage": [{"lines": 4, "delay": 1}, ...]}`)で
 //! 自分への予告を受け取る。`start` にも同じ形の `incoming` を付けられる。Cold Clear 2 は知らないメッセージを
 //! 無視するので、送る側は両方に同じものを送ってよい。
@@ -46,6 +47,8 @@ struct Best {
     nodes: u64,
     nps: f64,
     width: usize,
+    /// 狙い筋の文言(TBP の拡張 `aim`。TBA の情報パネルの「狙い」に出す)
+    aim: String,
 }
 
 #[derive(Default)]
@@ -224,7 +227,8 @@ fn worker(bot: &Bot, weights: &Weights, rules: &Rules, max_width: usize, specula
             if s.generation != generation {
                 break;
             }
-            s.best = Some(Best { result, nodes, nps, width });
+            let aim = tetrisai_engine::aim::describe(&root, &result.plan, rules);
+            s.best = Some(Best { result, nodes, nps, width, aim });
             drop(s);
             width *= 2;
         }
@@ -246,6 +250,8 @@ fn suggestion(best: Option<&Best>) -> Value {
             "nps": best.nps,
             "extra": format!("width={} depth={}", best.width, r.depth),
         },
+        // 【2026-11-01・ユーザー】狙い筋(TBA の情報パネルの「狙い」)。改行で2行まで
+        "aim": best.aim,
         "difficulty": candidates.iter().map(|c| json!({
             "soft_drop_sections": c.mv.soft_drop_sections,
             "mid_air_stops": c.mv.mid_air_stops,

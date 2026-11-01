@@ -1,5 +1,6 @@
 //! TetrisAI の思考部分: 評価関数と探索。
 
+pub mod aim;
 pub mod eval;
 pub mod opening;
 pub mod search;
