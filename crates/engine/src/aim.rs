@@ -10,9 +10,24 @@ use crate::eval::ren_potential;
 use crate::opening::Opening;
 use crate::search::Root;
 use crate::shape;
+use crate::strategy::Strategy;
 
 /// 狙い筋の文言(改行で2行まで)。`plan` は最善の読み筋(1手目から)。
+///
+/// 【2026-11-03】作戦層で「C4W で対抗」「早撃ち」を選んでいる時は、1行目を作戦と理由(相手の C4W の行数。情報パネルの
+/// 1行に収まるよう「(相手9行)」と短く書く)にし、
+/// 2行目に読み筋の狙い(下の describe_plan の1行目)を書く。
 pub fn describe(root: &Root, plan: &[Move], rules: &Rules) -> String {
+    let aim = describe_plan(root, plan, rules);
+    if root.strategy == Strategy::Normal || root.opening.is_active() {
+        return aim;
+    }
+    let theirs = root.opponent.map_or(0, |o| shape::ren_rows(&o.board));
+    let first = aim.lines().next().unwrap_or("");
+    format!("{}(相手{theirs}行)\n{first}", root.strategy.label())
+}
+
+fn describe_plan(root: &Root, plan: &[Move], rules: &Rules) -> String {
     match &root.opening {
         // 1行目はテンプレの名前だけにする(長い名前「タンドリーチキン積み」でも1行に収まるように)
         Opening::Template(t) => return format!("{}\nテンプレ・Tスピンを撃つまで", t.name),
@@ -103,6 +118,21 @@ mod tests {
         let mut during = r.clone();
         during.state.consecutive_clears = 2;
         assert_eq!(describe(&during, &[keep], &rules), "中あけREN 撃ち中\n毎手1ライン消す(残り8行)");
+    }
+
+    #[test]
+    fn 作戦層の作戦を1行目に書く() {
+        let rules = Rules::ppt2();
+        let mut opponent_rows = vec!["###....###"; 8];
+        opponent_rows.push("###.######");
+        let opponent = crate::search::Opponent { board: Board::from_rows(&opponent_rows), ..Default::default() };
+        let mut r = root(&["##........", "#...######", "##.#######"]);
+        r.opponent = Some(opponent);
+        r.strategy = Strategy::Rush;
+        let t = find_move(&r, Piece::T, 2, Spin::Full);
+        assert_eq!(describe(&r, &[t], &rules), "早撃ち(相手9行)\nTSD(この手)");
+        r.strategy = Strategy::C4WRival;
+        assert_eq!(describe(&r, &[t], &rules), "C4Wで対抗(相手9行)\nTSD(この手)");
     }
 
     #[test]

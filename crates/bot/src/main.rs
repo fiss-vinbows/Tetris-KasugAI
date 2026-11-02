@@ -36,7 +36,9 @@ use std::time::Instant;
 
 use serde_json::{json, Value};
 use tetrisai_core::{Board, Piece, Placement, PlayerState, Rules};
-use tetrisai_engine::{search, IncomingGarbage, OpeningTracker, Opponent, Root, SearchOptions, SearchResult, Weights};
+use tetrisai_engine::{
+    search, IncomingGarbage, OpeningTracker, Opponent, Root, SearchOptions, SearchResult, StrategyTracker, Weights,
+};
 
 const PLAN_LEN: usize = 5;
 const MAX_CANDIDATES: usize = 5;
@@ -95,6 +97,8 @@ fn main() {
             root.opening = tracker.observe(root, &rules);
         }
     };
+    // 【2026-11-03・ユーザー】作戦層: 相手の盤面(battle で受け取る。全自動だけ)を見て、C4W で対抗するか早撃ちするかを選ぶ
+    let mut strategy = StrategyTracker::default();
 
     let bot = Arc::new(Bot { shared: Mutex::new(Shared::default()), wake: Condvar::new(), generation: AtomicU64::new(0) });
     {
@@ -134,6 +138,7 @@ fn main() {
             "start" => match parse_start(&msg) {
                 Some(mut root) => {
                     observe(&mut root);
+                    root.strategy = strategy.current();
                     let mut s = bot.shared.lock().unwrap();
                     s.pending_start = root.queue.is_empty();
                     s.root = Some(root);
@@ -183,6 +188,7 @@ fn main() {
                     root.incoming = parse_incoming(&msg["incoming"]);
                     root.gauge = msg["gauge"].as_u64().unwrap_or(0) as u32;
                     root.opponent = parse_opponent(&msg["opponent"]);
+                    root.strategy = strategy.observe(&root.state.board, root.opponent.as_ref().map(|o| &o.board));
                     bot.bump(&mut s);
                 }
             }

@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use tetrisai_core::board::WIDTH;
 
 use crate::shape;
+use crate::strategy::Strategy;
 use tetrisai_core::{Board, ClearResult, Move, Piece, PieceLocation, Rotation, Rules, Spin};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -110,6 +111,12 @@ pub struct Weights {
     /// 自動調整はしない(序盤の作戦はランダムに選ぶので、勝敗から重みを決めにくい)。8 にすると、テンプレを選んだ対局の
     /// 約84%でテンプレの Tスピンを撃てる(4 では約74%、12 でも8と同じ。設計書 8.10)
     pub template_piece: f32,
+
+    // ---- 作戦層(2026-11-03。strategy.rs。全自動で相手の情報があるときだけ効く。既定値は0) ----
+    /// 「C4W で対抗」のとき、貯めた REN の火力1行あたりに足す点
+    pub rival_ren: f32,
+    /// 「早撃ち」のとき、相手に届く攻撃1行あたりに足す点(C4W は組まない)
+    pub rush_attack: f32,
 }
 
 /// 盤面の評価に渡す、局面ごとの値。
@@ -123,6 +130,8 @@ pub struct EvalContext {
     pub consecutive_clears: u32,
     /// 序盤(テンプレか素の状態)か。序盤は中あけ REN を組まない(中あけの項目を使わない)
     pub opening: bool,
+    /// 作戦層の作戦(strategy.rs)
+    pub strategy: Strategy,
 }
 
 /// 相手の情報から作る、評価に使う値(探索の最初に1回だけ計算する)。
@@ -134,6 +143,8 @@ pub struct BattleContext {
     pub opponent_threat: u32,
     /// 自分の攻撃ゲージ(REN 中にためている攻撃。次にラインを消さない手を置くと相手へ送られる)
     pub gauge: u32,
+    /// 作戦層の作戦(strategy.rs)
+    pub strategy: Strategy,
 }
 
 /// 予告の影響(探索の中で計算する)。
@@ -186,6 +197,8 @@ impl Default for Weights {
             tst_slot: 0.0,
             c_spin: 0.0,
             template_piece: 8.0,
+            rival_ren: 0.0,
+            rush_attack: 0.0,
         }
     }
 }
@@ -236,8 +249,12 @@ pub fn evaluate(w: &Weights, rules: &Rules, board: &Board, back_to_back: bool, c
         e += w.tsd_slot_any * shape::tsd_slots(board).len().min(2) as f32;
     }
     // 【2026-11-01・ユーザー】いきなり REN を組むのは対策されると弱いので、序盤は中あけの項目を使わない
-    if !ctx.opening {
+    // 【2026-11-03・ユーザー】作戦層の「早撃ち」では C4W を組まない
+    if !ctx.opening && ctx.strategy != Strategy::Rush {
         e += center_well_value(w, rules, board, ctx);
+        if ctx.strategy == Strategy::C4WRival && w.rival_ren != 0.0 {
+            e += w.rival_ren * ren_potential(rules, board, ctx.consecutive_clears) as f32;
+        }
     }
     if w.pc_chance != 0.0 && shape::pc_possible(board) {
         e += w.pc_chance;
@@ -344,6 +361,9 @@ pub fn ren_potential(rules: &Rules, board: &Board, consecutive_clears: u32) -> u
 /// `our_top` は自分の盤面の高さ(予告の分を上乗せしたもの)。
 pub fn battle_value(w: &Weights, ctx: &BattleContext, outgoing: u32, our_top: u32) -> f32 {
     let mut v = w.attack_sent * outgoing as f32;
+    if ctx.strategy == Strategy::Rush {
+        v += w.rush_attack * outgoing as f32;
+    }
     if let Some(danger) = ctx.opponent_danger {
         v += w.attack_sent_danger * outgoing as f32 * (danger as f32 / 20.0);
         let margin = 20u32.saturating_sub(danger);
@@ -464,7 +484,7 @@ mod tests {
     fn とどめと相手の危なさ() {
         let w = Weights::default();
         // 相手は17段(余裕3段)。4行届けばとどめ、2行では足りない
-        let ctx = BattleContext { opponent_danger: Some(17), opponent_threat: 0, gauge: 0 };
+        let ctx = BattleContext { opponent_danger: Some(17), ..Default::default() };
         let lethal = battle_value(&w, &ctx, 4, 5);
         let not = battle_value(&w, &ctx, 2, 5);
         assert!(lethal - not > w.lethal * 0.9, "{lethal} {not}");

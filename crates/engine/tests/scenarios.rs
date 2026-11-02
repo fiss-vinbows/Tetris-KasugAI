@@ -352,3 +352,152 @@ fn 素の状態の序盤では中あけを作らない() {
         assert_eq!(tetrisai_engine::shape::ren_rows(&end.board), 0, "{queue}: {steps:?}\n{}", board_text(&end.board));
     }
 }
+
+// ---------------- 当初の構想(2026-11-03。重み concept.toml。勝率は度外視) ----------------
+//
+// 【2026-11-03・ユーザー】「シミュレーションの勝率を度外視してもいいので当初の構想を搭載したい」。
+
+fn concept_weights() -> Weights {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/weights/concept.toml");
+    toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// 空中TSD: C4W(中あけ REN)の上に S・Z が固まって来て綺麗に積めない時は、中あけの上に渡して空中TSDを組み、撃って中あけを戻す。
+/// input/practice_20261019_214345_5397d0.png の局面(M5 の試験用の重みと同じ局面)。
+#[test]
+fn 構想_空中tsdを撃って中あけを保つ() {
+    let board = Board::from_rows(&["..#....##.", ".##....###", "##...#####", "###.######", "###....###", "###....###"]);
+    let root = Root {
+        state: PlayerState::new(board),
+        hold: Some(Piece::J),
+        queue: vec![Piece::T, Piece::O, Piece::L, Piece::Z, Piece::S, Piece::I],
+        ..Default::default()
+    };
+    let (steps, _) = run_plan(&root, &concept_weights());
+    // HOLD の J を先に置いてから撃つこともある。撃った後は、戻った中あけで REN を始めてよい
+    assert!(steps[..2].contains(&(Piece::T, Spin::Full, 2)), "2手目までに空中TSD を撃っていない: {steps:?}");
+}
+
+/// 空中TSD を組む: C4W を積む途中で S・Z が続けて来たら、中あけをふさがずに空中TSD の形を作る(中あけの上に渡す)。
+/// 盤面は、S・Z・S・Z で空中TSD の形を作れるもの(examples/air_tsd_probe で総当たりして確かめた。左右が平らだと作れない)。
+#[test]
+fn 構想_szが固まったら空中tsdの形を作る() {
+    let board = Board::from_rows(&["##.....###", "###....###", "###....###", "###....###", "###.######"]);
+    let root = Root {
+        state: PlayerState::new(board),
+        queue: vec![Piece::S, Piece::Z, Piece::S, Piece::Z, Piece::T, Piece::O],
+        ..Default::default()
+    };
+    let (steps, end) = run_plan(&root, &concept_weights());
+    let air = tetrisai_engine::shape::has_air_tsd(&end.board) > 0
+        || steps.iter().any(|&(p, spin, lines)| p == Piece::T && spin == Spin::Full && lines == 2);
+    assert!(air, "空中TSD を組んでいない: {steps:?}\n{}", board_text(&end.board));
+    assert!(tetrisai_engine::shape::ren_rows(&end.board) >= 2, "中あけをふさいだ: {steps:?}\n{}", board_text(&end.board));
+}
+
+/// 火力重視: おじゃまの穴を使った TST(2枚目の画像)を読み筋に入れる。
+#[test]
+fn 構想_おじゃまの穴を使ったtst() {
+    let root = tst_position();
+    let options = SearchOptions { width: 512, max_depth: 6, speculate: false };
+    let r = search(&root, &options, &concept_weights(), &Rules::ppt2(), &|| false).unwrap();
+    let clears = plan_clears(&root, &r);
+    assert!(
+        clears.iter().any(|&(p, spin, lines)| p == Piece::T && spin == Spin::Full && lines == 3),
+        "TST が読み筋に入らない: {clears:?}"
+    );
+}
+
+/// 火力重視: C-spin の形があれば TST → すぐ TSD と撃つ(TST の後の整地を TSD のソフトドロップだけで済ませる)。
+#[test]
+fn 構想_c_spinでtstからtsdを撃つ() {
+    let board = Board::from_rows(&[
+        "##........", "##..#..#..", "####...###", "####.#####", "####..####", "####.#####", "#####.####",
+    ]);
+    let root = Root {
+        state: PlayerState::new(board),
+        queue: vec![Piece::T, Piece::T, Piece::O, Piece::I, Piece::L, Piece::S],
+        ..Default::default()
+    };
+    let (steps, _) = run_plan(&root, &concept_weights());
+    assert_eq!(steps[0], (Piece::T, Spin::Full, 3), "1手目で TST: {steps:?}");
+    assert_eq!(steps[1], (Piece::T, Spin::Full, 2), "2手目で TSD: {steps:?}");
+}
+
+/// 火力重視: 屋根の無い C-spin の途中の形から、屋根を作って C-spin を組み上げる。
+#[test]
+fn 構想_屋根を作ってc_spinを組む() {
+    let board = Board::from_rows(&["##........", "####...###", "####.#####", "####..####", "####.#####", "#####.####"]);
+    let root = Root {
+        state: PlayerState::new(board),
+        queue: vec![Piece::J, Piece::T, Piece::O, Piece::T, Piece::I, Piece::L],
+        ..Default::default()
+    };
+    let (steps, _) = run_plan(&root, &concept_weights());
+    assert!(steps.contains(&(Piece::T, Spin::Full, 3)), "TST を撃っていない: {steps:?}");
+}
+
+/// カウンター: 相手が高く、こちらに余裕があれば、相殺を外して受けてから撃つ。相手が低ければすぐ撃って相殺する。
+#[test]
+fn 構想_相手が高い時だけ相殺を外す() {
+    let w = concept_weights();
+    let (high, clears) = first_move_clears(&counter_position(17), &w);
+    assert_eq!(high, 0, "相手17段: 1手目で消して相殺した: {clears:?}");
+    let (low, clears) = first_move_clears(&counter_position(4), &w);
+    assert_eq!(low, 2, "相手4段: すぐ TSD で相殺していない: {clears:?}");
+    let (none, clears) = first_move_clears(&Root { opponent: None, ..counter_position(17) }, &w);
+    assert_eq!(none, 2, "相手の情報なし: すぐ TSD で相殺していない: {clears:?}");
+}
+
+/// 相手が大きく育てた C4W(種3 + 中あけ8行)。
+fn opponent_c4w() -> tetrisai_engine::Opponent {
+    let mut rows = vec!["###....###"; 8];
+    rows.push("###.######");
+    tetrisai_engine::Opponent { board: Board::from_rows(&rows), incoming: 0, gauge: 0, back_to_back: false }
+}
+
+/// 作戦層「早撃ち」: 相手の C4W が大きく育っている時は、同じ形で追いかけず C4W を組まない
+/// (作戦が無いと、このミノ順では空の盤面から種3の中あけを積み始める: 素の状態の序盤のテストと同じ)。
+#[test]
+fn 構想_早撃ちでは自分はc4wを組まない() {
+    for queue in ["SZOITLJ", "JZITOLS"] {
+        let root = Root {
+            queue: pieces(queue),
+            opponent: Some(opponent_c4w()),
+            strategy: tetrisai_engine::Strategy::Rush,
+            ..Default::default()
+        };
+        let (steps, end) = run_plan(&root, &concept_weights());
+        assert_eq!(tetrisai_engine::shape::ren_rows(&end.board), 0, "{queue}: {steps:?}\n{}", board_text(&end.board));
+    }
+}
+
+/// 作戦層「早撃ち」: Tスピンを撃てるなら、1手目から撃って相手をせり上げる(TSS + 次の2ライン消しを選ぶこともある)。
+#[test]
+fn 構想_早撃ちではtスピンをすぐ撃つ() {
+    let root = Root {
+        state: PlayerState::new(Board::from_rows(&["##........", "#...######", "##.#######"])),
+        queue: vec![Piece::T, Piece::O, Piece::I, Piece::L, Piece::J],
+        opponent: Some(opponent_c4w()),
+        strategy: tetrisai_engine::Strategy::Rush,
+        ..Default::default()
+    };
+    let (steps, _) = run_plan(&root, &concept_weights());
+    let (piece, spin, lines) = steps[0];
+    assert!(piece == Piece::T && spin == Spin::Full && lines >= 1, "Tスピンをすぐ撃っていない: {steps:?}");
+}
+
+/// 作戦層「C4W で対抗」: 自分の C4W も育っていれば、撃たずに貯めて対抗する。
+#[test]
+fn 構想_対抗ではc4wを貯める() {
+    let root = Root {
+        state: PlayerState::new(seed3_well(7)),
+        queue: REN_QUEUE.to_vec(),
+        opponent: Some(opponent_c4w()),
+        strategy: tetrisai_engine::Strategy::C4WRival,
+        ..Default::default()
+    };
+    let (steps, end) = run_plan(&root, &concept_weights());
+    assert!(steps.iter().all(|&(_, _, lines)| lines == 0), "撃ってしまった: {steps:?}");
+    assert_eq!(tetrisai_engine::shape::center_well_seed(&end.board), 3, "{}", board_text(&end.board));
+}

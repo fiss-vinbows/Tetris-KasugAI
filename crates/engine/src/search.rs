@@ -23,6 +23,7 @@
 use std::collections::HashMap;
 
 use crate::opening::Opening;
+use crate::strategy::Strategy;
 use crate::eval::{
     battle_value, evaluate, opponent_threat, reward, BattleContext, EvalContext, Garbage, Weights,
 };
@@ -65,6 +66,8 @@ pub struct Root {
     pub opponent: Option<Opponent>,
     /// 序盤の作戦(テンプレか素の状態。bot・対戦シミュレーターが `OpeningTracker` で選ぶ)
     pub opening: Opening,
+    /// 作戦層の作戦(相手の情報があるとき、bot が `StrategyTracker` で選ぶ)
+    pub strategy: Strategy,
 }
 
 impl Root {
@@ -247,6 +250,7 @@ pub fn search(
         opponent_danger: root.opponent.map(|o| o.board.max_height() + o.incoming),
         opponent_threat: root.opponent.map_or(0, |o| opponent_threat(rules, &o.board, o.gauge, o.back_to_back)),
         gauge: root.gauge,
+        strategy: root.strategy,
     };
     let mut nodes = 0u64;
     let mut moves = Vec::with_capacity(64);
@@ -318,6 +322,7 @@ pub fn search(
                         garbage,
                         consecutive_clears: state.consecutive_clears,
                         opening: root.opening.is_active(),
+                        strategy: root.strategy,
                     };
                     let score = r
                         + evaluate(weights, rules, &state.board, state.back_to_back, &ctx)
@@ -424,6 +429,7 @@ pub fn search(
                             garbage,
                             consecutive_clears: state.consecutive_clears,
                             opening: root.opening.is_active(),
+                            strategy: root.strategy,
                         };
                         let s = node.reward
                             + reward(weights, rules, mv, &result)

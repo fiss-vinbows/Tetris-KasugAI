@@ -3,7 +3,7 @@
 use std::io;
 
 use tetrisai_core::{Piece, Placement, PlayerState, Rules};
-use tetrisai_engine::{search, IncomingGarbage, OpeningTracker, Opponent, Root, SearchOptions, Weights};
+use tetrisai_engine::{search, IncomingGarbage, OpeningTracker, Opponent, Root, SearchOptions, StrategyTracker, Weights};
 
 use crate::battle::{Incoming, Player};
 
@@ -77,6 +77,8 @@ pub struct EngineAgent {
     pub speculate: bool,
     /// 序盤の作戦(TD系テンプレか素の状態をランダムで選ぶ)。None なら使わない
     pub opening: Option<OpeningTracker>,
+    /// 作戦層(相手の情報を使うとき、相手の C4W を見て作戦を選ぶ)
+    strategy: StrategyTracker,
     root: Option<Root>,
 }
 
@@ -91,6 +93,7 @@ impl EngineAgent {
             use_opponent: true,
             speculate: false,
             opening: None,
+            strategy: StrategyTracker::default(),
             root: None,
         }
     }
@@ -135,6 +138,7 @@ impl Agent for EngineAgent {
                 gauge: o.gauge,
                 back_to_back: o.state.back_to_back,
             });
+            root.strategy = self.strategy.observe(&root.state.board, Some(&o.state.board));
         }
         Ok(())
     }
