@@ -98,6 +98,10 @@ pub struct Weights {
     pub pc_chance: f32,
     /// ソフトドロップで落とした段数1段あたり(低い盤面での Tスピンは落とす時間が長く効率が悪い)
     pub soft_drop_rows: f32,
+    /// Tスピン(TSS・TSD・TST)以外の手のソフトドロップの区間1つあたり(`soft_drop_section` に足す)。
+    /// 【2026-11-03・ユーザー(実機の全自動)】「Tスピン以外のソフトドロップを控えられませんか」。全自動では落とす時間が
+    /// そのまま遅れになり、S・Z・O・I の差し込みや回さずに横へ滑り込ませる T でも使っていた(1局 約9手、全体の約5%)
+    pub soft_drop_non_spin: f32,
 
     // ---- C-spin(暫定。既定値は0で効かない。試験用の重みは config/weights/experimental_cspin.toml) ----
     /// TST の溝(縦向きの T を入れると3行消える形)1つあたり(2つまで)
@@ -194,6 +198,7 @@ impl Default for Weights {
             tsd_slot_any: 0.0,
             pc_chance: 0.0,
             soft_drop_rows: 0.0,
+            soft_drop_non_spin: 0.0,
             tst_slot: 0.0,
             c_spin: 0.0,
             template_piece: 8.0,
@@ -227,6 +232,9 @@ pub fn reward(w: &Weights, rules: &Rules, mv: &Move, result: &ClearResult) -> f3
         r += w.wasted_t;
     }
     r += w.soft_drop_section * mv.soft_drop_sections as f32;
+    if result.spin != Spin::Full {
+        r += w.soft_drop_non_spin * mv.soft_drop_sections as f32;
+    }
     r += w.mid_air_stop * mv.mid_air_stops as f32;
     if mv.soft_drop_sections > 0 {
         // ソフトドロップで落とした段数の目安: 出現位置の高さから置いた位置まで
@@ -604,6 +612,28 @@ mod tests {
         let low = reward(&w, &rules, &mv(1), &result);
         let high = reward(&w, &rules, &mv(11), &result);
         assert!((high - low - 1.0).abs() < 1e-4, "10段の差で 0.1 × 10 = 1.0 の差: {low} {high}");
+    }
+
+    #[test]
+    fn tスピン以外のソフトドロップだけ減点する() {
+        // 【2026-11-03・ユーザー】「Tスピン以外のソフトドロップを控えられませんか」
+        use tetrisai_core::{Placement, Rotation};
+        let w = Weights { soft_drop_non_spin: -3.0, ..Weights::default() };
+        let rules = Rules::ppt2();
+        let mv = |piece: Piece, spin: Spin, sections: u8| Move {
+            placement: Placement { location: PieceLocation::new(piece, Rotation::North, 4, 5), spin },
+            mid_air_stops: 0,
+            soft_drop_sections: sections,
+            inputs: 2,
+        };
+        let gain = |m: &Move, result: &ClearResult| reward(&w, &rules, m, result) - reward(&Weights::default(), &rules, m, result);
+        let tsd = ClearResult { lines: 2, spin: Spin::Full, ..Default::default() };
+        assert_eq!(gain(&mv(Piece::T, Spin::Full, 1), &tsd), 0.0, "Tスピンのソフトドロップは減点しない");
+        let none = ClearResult::default();
+        assert!((gain(&mv(Piece::S, Spin::None, 1), &none) + 3.0).abs() < 1e-4, "S の差し込み");
+        assert!((gain(&mv(Piece::T, Spin::None, 2), &none) + 6.0).abs() < 1e-4, "回さずに滑り込ませる T(2区間)");
+        assert!((gain(&mv(Piece::T, Spin::Mini, 1), &ClearResult { lines: 1, spin: Spin::Mini, ..Default::default() }) + 3.0).abs() < 1e-4, "Tスピンミニも減点する");
+        assert_eq!(gain(&mv(Piece::O, Spin::None, 0), &none), 0.0, "ハードドロップだけの手");
     }
 
     #[test]

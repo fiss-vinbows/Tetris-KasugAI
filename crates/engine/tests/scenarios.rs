@@ -421,7 +421,8 @@ fn 構想_c_spinでtstからtsdを撃つ() {
     };
     let (steps, _) = run_plan(&root, &concept_weights());
     assert_eq!(steps[0], (Piece::T, Spin::Full, 3), "1手目で TST: {steps:?}");
-    assert_eq!(steps[1], (Piece::T, Spin::Full, 2), "2手目で TSD: {steps:?}");
+    // 【2026-11-03】Tスピン以外のソフトドロップを減点してから、間に O を1つ置いてから TSD を撃つこともある
+    assert!(steps[1..3].contains(&(Piece::T, Spin::Full, 2)), "TST の後2手以内に TSD: {steps:?}");
 }
 
 /// 火力重視: 屋根の無い C-spin の途中の形から、屋根を作って C-spin を組み上げる。

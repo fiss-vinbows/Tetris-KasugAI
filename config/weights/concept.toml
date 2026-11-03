@@ -39,3 +39,4 @@ tst_slot = 1.0
 c_spin = 4.0
 rival_ren = 0.5
 rush_attack = 1.0
+soft_drop_non_spin = -4.0
