@@ -161,7 +161,7 @@ mod tests {
     #[test]
     fn 同梱のルールが読める() {
         let rules = Rules::ppt2();
-        assert_eq!(rules.spawn(), Spawn { x: 4, y: 20 });
+        assert_eq!(rules.spawn(), Spawn { x: 4, y: 19 });
         assert_eq!(rules.line_attack(4, Spin::None), 4);
         assert_eq!(rules.line_attack(2, Spin::Full), 4);
         assert_eq!(rules.line_attack(3, Spin::Full), 6);

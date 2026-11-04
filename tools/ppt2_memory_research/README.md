@@ -9,6 +9,7 @@ TBA の venv の Python で、`../Tetris` フォルダから実行する(`src.au
 |---|---|---|
 | `record_player_mem.py` | 1P・2P のプレイヤーのオブジェクトから2段先までの構造体の int32 の変化を、対局が進んでいる間だけ記録する | `python -X utf8 record_player_mem.py <秒> <出力>`(対局していない間は書かないので、長めに回して待てる) |
 | `analyze_incoming.py` | 記録から、予告らしい値(ふだん0、ときどき1〜40になって0に戻る)を局ごとに探し、同じ場所で何局に出るかを並べる | `python -X utf8 analyze_incoming.py <記録> HH:MM:SS-HH:MM:SS ...`(局ごとの時間の範囲) |
+| `record_incoming_raw.py` | 予告の行数と続きの値を検査せずに、変わった時だけ記録する | `python -X utf8 record_incoming_raw.py <秒> <出力>` |
 | `monitor_queues.py` | キューの構造体の候補(たどり方ごと)の中身の変化を記録する(2P のキューを見つけた時の道具) | `python -X utf8 monitor_queues.py <秒> <出力>` |
 
 分かったこと(TBA の `src/auto/ppt2_memory.py` の説明にも書いてある):

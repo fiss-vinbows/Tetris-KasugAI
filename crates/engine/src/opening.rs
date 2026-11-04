@@ -5,6 +5,8 @@
 //! タンドリーチキン積み)、知識は KasugAI の中に持つ、序盤は「テンプレを撃つまで」(素の状態は同じくらいの
 //! 14手まで)、割合は半々(テンプレの中では、見えているミノで組めるものから均等に選ぶ)。
 //!
+//! 【2026-11-04・ユーザー】タンドリーチキン積みは Oミノの入れ方が失敗しやすいので候補から外した(図のデータは残す)。
+//!
 //! テンプレの図は TBA から書き出したもの(`data/td_templates.json`、`tools/export_td_templates.py`)。
 //! テンプレの進め方は探索に任せる: 図のどれかに合うように、図のマスへ図と同じミノを置く手に加点する
 //! (`Weights::template_piece`)。図は巡ごとにあり、次の巡の図は「既に置いてあるブロック」が今の盤面と
@@ -71,13 +73,17 @@ fn bits(cells: impl IntoIterator<Item = (i8, i8)>) -> [u64; WIDTH] {
     b
 }
 
-/// TD系テンプレ6種(engine に埋め込んだ図を初回に読む)。
+/// 図のデータにあっても、序盤の候補にしないテンプレ。
+const EXCLUDED_TEMPLATES: [&str; 1] = ["タンドリーチキン積み"];
+
+/// TD系テンプレ5種(engine に埋め込んだ図を初回に読む。`EXCLUDED_TEMPLATES` は除く)。
 pub fn td_templates() -> &'static [Arc<Template>] {
     static TEMPLATES: OnceLock<Vec<Arc<Template>>> = OnceLock::new();
     TEMPLATES.get_or_init(|| {
         let raw: Vec<RawTemplate> =
             serde_json::from_str(include_str!("../data/td_templates.json")).expect("td_templates.json を読めない");
         raw.into_iter()
+            .filter(|t| !EXCLUDED_TEMPLATES.contains(&t.name.as_str()))
             .map(|t| {
                 let forms = t
                     .forms
@@ -315,9 +321,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn td系テンプレ6種を読める() {
+    fn td系テンプレ5種を読める() {
         let names: Vec<&str> = td_templates().iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, ["ホットケーキ積み", "くろみつ砲", "PC-Spin", "皐月積み", "ベーカリーTD", "タンドリーチキン積み"]);
+        assert_eq!(names, ["ホットケーキ積み", "くろみつ砲", "PC-Spin", "皐月積み", "ベーカリーTD"]);
         for t in td_templates() {
             assert!(t.forms.iter().any(|f| f.is_first()), "{} に1巡目の図が無い", t.name);
             assert!(t.forms.iter().any(|f| !f.last.is_empty()), "{} に Tスピンの図が無い", t.name);
