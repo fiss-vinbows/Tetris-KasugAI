@@ -301,6 +301,9 @@ pub fn search(
                             on_template = result.lines == 0;
                         }
                     }
+                    if matches!(root.opening, Opening::Tsd) && result.spin == tetrisai_core::Spin::Full && result.lines == 2 {
+                        r += weights.opening_tsd;
+                    }
                     let t_known = hold.map_or(0, |h| (h == Piece::T) as usize)
                         + root.queue[next.min(root.queue.len())..].iter().filter(|&&p| p == Piece::T).count();
                     let t_available = t_known.clamp(1, 2);

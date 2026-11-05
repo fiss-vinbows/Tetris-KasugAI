@@ -8,6 +8,6 @@ pub mod shape;
 pub mod strategy;
 
 pub use eval::{BattleContext, EvalContext, Garbage, Weights};
-pub use opening::{Opening, OpeningTracker};
+pub use opening::{Opening, OpeningMode, OpeningTracker};
 pub use strategy::{Strategy, StrategyTracker};
 pub use search::{search, Candidate, IncomingGarbage, Opponent, Root, SearchOptions, SearchResult};

@@ -214,6 +214,38 @@ pub enum Opening {
     Plain,
     /// テンプレの序盤(図どおりの手に加点する)
     Template(Arc<Template>),
+    /// 開幕TSD の序盤(TSD に加点する。最初に消すか14手で終わる。2026-11-05)
+    Tsd,
+}
+
+/// 開幕に何を目指すか(2026-11-05・ユーザー。全自動の設定で選ぶ)。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OpeningMode {
+    /// これまでの既定: TD系テンプレか素の状態を半々で選ぶ
+    #[default]
+    TemplateOrPlain,
+    /// TDテンプレ・開幕TSD・種3C4W から均等に選ぶ
+    Random,
+    /// TDテンプレ(組めるものが無ければ素の状態)
+    Td,
+    /// 開幕TSD
+    Tsd,
+    /// 種3C4W(序盤の作戦を使わず、最初から中あけの評価で種3を作る)
+    Seed3,
+}
+
+impl OpeningMode {
+    /// bot の `--opening` の値から。知らない値は None。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "default" => Some(Self::TemplateOrPlain),
+            "random" => Some(Self::Random),
+            "td" => Some(Self::Td),
+            "tsd" => Some(Self::Tsd),
+            "seed3" => Some(Self::Seed3),
+            _ => None,
+        }
+    }
 }
 
 impl Opening {
@@ -229,6 +261,8 @@ enum State {
     /// 素の状態。選んでから置いたミノの数
     Plain(u32),
     Template(Arc<Template>),
+    /// 開幕TSD。選んでから置いたミノの数
+    Tsd(u32),
 }
 
 /// 対局の序盤の作戦を選び、進み具合を追う(bot と対戦シミュレーターで使う)。
@@ -241,11 +275,16 @@ pub struct OpeningTracker {
     /// 選んだときから、直前に見た盤面
     last_board: Option<Board>,
     rng: u64,
+    mode: OpeningMode,
 }
 
 impl OpeningTracker {
     pub fn new(seed: u64) -> Self {
-        OpeningTracker { state: State::Done, last_board: None, rng: seed | 1 }
+        Self::with_mode(seed, OpeningMode::default())
+    }
+
+    pub fn with_mode(seed: u64, mode: OpeningMode) -> Self {
+        OpeningTracker { state: State::Done, last_board: None, rng: seed | 1, mode }
     }
 
     fn next_random(&mut self) -> u64 {
@@ -264,7 +303,7 @@ impl OpeningTracker {
         if board.is_empty() && !root.queue.is_empty() {
             let fresh = match &self.state {
                 State::Done => true,
-                State::Plain(n) => *n > 0,
+                State::Plain(n) | State::Tsd(n) => *n > 0,
                 State::Template(_) => changed,
             };
             if fresh {
@@ -273,6 +312,7 @@ impl OpeningTracker {
         } else if changed {
             self.state = match std::mem::replace(&mut self.state, State::Done) {
                 State::Plain(n) if n + 1 < PLAIN_PIECES => State::Plain(n + 1),
+                State::Tsd(n) if !fewer_cells && n + 1 < PLAIN_PIECES => State::Tsd(n + 1),
                 State::Template(t) if !fewer_cells && t.consistent(&board) => State::Template(t),
                 _ => State::Done,
             };
@@ -282,9 +322,22 @@ impl OpeningTracker {
     }
 
     fn choose(&mut self, root: &Root, rules: &Rules) {
+        let mode = match self.mode {
+            OpeningMode::Random => [OpeningMode::Td, OpeningMode::Tsd, OpeningMode::Seed3][(self.next_random() % 3) as usize],
+            mode => mode,
+        };
         self.state = State::Plain(0);
-        if self.next_random().is_multiple_of(2) {
-            return;
+        match mode {
+            OpeningMode::Tsd => {
+                self.state = State::Tsd(0);
+                return;
+            }
+            OpeningMode::Seed3 => {
+                self.state = State::Done;
+                return;
+            }
+            OpeningMode::TemplateOrPlain if self.next_random().is_multiple_of(2) => return,
+            _ => {}
         }
         let candidates: Vec<&Arc<Template>> =
             td_templates().iter().filter(|t| t.buildable(&root.queue, root.hold, rules)).collect();
@@ -300,6 +353,7 @@ impl OpeningTracker {
             State::Done => Opening::None,
             State::Plain(_) => Opening::Plain,
             State::Template(t) => Opening::Template(t.clone()),
+            State::Tsd(_) => Opening::Tsd,
         }
     }
 
@@ -371,6 +425,7 @@ mod tests {
                 Opening::Plain => plain += 1,
                 Opening::Template(_) => template += 1,
                 Opening::None => panic!("空の盤面で序盤にならない"),
+                Opening::Tsd => panic!("既定では開幕TSDを選ばない"),
             }
         }
         // 組めるテンプレがあるミノ順なので、おおよそ半々

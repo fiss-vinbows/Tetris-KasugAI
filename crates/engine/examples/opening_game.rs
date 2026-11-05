@@ -38,6 +38,7 @@ fn main() {
                 chosen = match &root.opening {
                     Opening::Template(t) => format!("テンプレ {}", t.name),
                     Opening::Plain => "素".to_string(),
+                    Opening::Tsd => "開幕TSD".to_string(),
                     Opening::None => "なし".to_string(),
                 };
             }

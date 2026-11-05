@@ -105,6 +105,10 @@ pub fn center_well_rows(board: &Board) -> u32 {
 /// 左右がまだ埋まっていなくても数える(対局の始めに、左右へまたがるミノで種を作るため。例: I を横にして
 /// 右の列にかけると中央に3マス)。左右が埋まってからでは、中央のマス数の4で割った余りが変わらないので作れない。
 pub fn center_well_seed(board: &Board) -> u32 {
+    // 中あけがあれば、そのすぐ下だけを見る(下にせり上がったおじゃまを種に数えない。2026-11-05)
+    if let Some(start) = (0..board.max_height()).find(|&y| row(board, y) == SIDES) {
+        return seed_below(board, start).0;
+    }
     let mut seed = 0;
     for y in 0..=board.max_height() {
         let center = row(board, y) & CENTER;
@@ -114,6 +118,23 @@ pub fn center_well_seed(board: &Board) -> u32 {
         seed += center.count_ones();
     }
     seed
+}
+
+/// `start` 行のすぐ下の、左右が埋まり中央が埋まりきっていない行(2行まで)の (中央のマス数, 行数)。
+fn seed_below(board: &Board, start: u32) -> (u32, u32) {
+    let (mut seed, mut rows) = (0, 0);
+    let mut y = start;
+    while y > 0 && rows < 2 {
+        y -= 1;
+        let r = row(board, y);
+        let center = r & CENTER;
+        if r & SIDES != SIDES || center == CENTER || center == 0 {
+            break;
+        }
+        seed += center.count_ones();
+        rows += 1;
+    }
+    (seed, rows)
 }
 
 /// 中あけ REN で続けて消せる行数の見込み。
@@ -130,28 +151,17 @@ pub fn center_well_seed(board: &Board) -> u32 {
 /// 途中で REN が切れやすいので、余り1・2は4分の3、余り0(種0)は半分に見積もる(大まかな目安)。
 pub fn ren_rows(board: &Board) -> u32 {
     let height = board.max_height();
-    let Some(bottom) = (0..height).find(|&y| row(board, y) & CENTER != CENTER) else { return 0 };
-    let mut seed = 0;
-    let mut seed_rows = 0;
+    // 【2026-11-05・ユーザー「せり上がると C4W を消化せず通常形に戻す」】中央に穴のあるおじゃまがせり上がると、それを種と数えて
+    // 3行目で打ち切り、行数が0になっていた。中央4列がすべて空いた一番下の行から数え、種はそのすぐ下の2行までを見る
+    let Some(start) = (0..height).find(|&y| row(board, y) == SIDES) else { return 0 };
     let mut empty_rows = 0;
-    for y in bottom..height {
-        let r = row(board, y);
-        let center = r & CENTER;
-        if r & SIDES != SIDES || center == CENTER {
+    for y in start..height {
+        if row(board, y) != SIDES {
             break;
         }
-        if center == 0 {
-            empty_rows += 1;
-        } else if empty_rows == 0 && seed_rows < 2 {
-            seed += center.count_ones();
-            seed_rows += 1;
-        } else {
-            break;
-        }
+        empty_rows += 1;
     }
-    if empty_rows == 0 || seed > 6 {
-        return 0;
-    }
+    let (seed, seed_rows) = seed_below(board, start);
     let rows = seed_rows + empty_rows;
     match seed % 4 {
         3 => rows,

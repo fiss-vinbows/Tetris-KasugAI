@@ -93,6 +93,12 @@ pub struct Stats {
     pub soft_drop_non_spin: u32,
     /// ラインを消した手の数(実機ではライン消去の演出 約0.7秒を待つ。2026-11-01 全自動の速さの比較用)
     pub clear_moves: u32,
+    /// B2B が続いていたのに、普通の消去で切った回数(2026-11-05)
+    pub b2b_breaks: u32,
+    /// そのうち REN の途中(前の手でも消していた)で切った回数
+    pub b2b_breaks_in_ren: u32,
+    /// そのうち1列消しで切った回数
+    pub b2b_breaks_single: u32,
 }
 
 /// 1手置いた結果。
@@ -232,8 +238,14 @@ impl Player {
         }
         let revealed = self.refill(sequence);
 
+        let had_b2b = self.state.back_to_back;
         let result = self.state.apply(&mv.placement, rules);
         let s = &mut self.stats;
+        if had_b2b && result.lines > 0 && !self.state.back_to_back {
+            s.b2b_breaks += 1;
+            s.b2b_breaks_in_ren += (result.ren > 0) as u32;
+            s.b2b_breaks_single += (result.lines == 1) as u32;
+        }
         s.pieces += 1;
         s.attack += result.attack;
         s.lines += result.lines;

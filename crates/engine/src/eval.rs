@@ -49,6 +49,8 @@ pub struct Weights {
     pub mini_spin_clears: [f32; 3],
     pub spin_clears: [f32; 4],
     pub back_to_back_clear: f32,
+    /// 続いていた B2B を普通の消去で切った手の点(2026-11-05・利用者「単発消しで B2B を切りすぎ」)
+    pub back_to_back_broken: f32,
     /// REN の攻撃量(ルール設定の REN 表)1行あたりの点
     pub combo_attack: f32,
     pub perfect_clear: f32,
@@ -115,6 +117,11 @@ pub struct Weights {
     /// 自動調整はしない(序盤の作戦はランダムに選ぶので、勝敗から重みを決めにくい)。8 にすると、テンプレを選んだ対局の
     /// 約84%でテンプレの Tスピンを撃てる(4 では約74%、12 でも8と同じ。設計書 8.10)
     pub template_piece: f32,
+    /// 開幕TSD の序盤で TSD を撃つ手の加点(2026-11-05)
+    pub opening_tsd: f32,
+    /// 盤面が低い時(10段以下)の TST の溝の追加の点(2026-11-05・ユーザー「盤面が低い時は TST を多用したい」)
+    #[serde(default)]
+    pub tst_slot_low: f32,
 
     // ---- 作戦層(2026-11-03。strategy.rs。全自動で相手の情報があるときだけ効く。既定値は0) ----
     /// 「C4W で対抗」のとき、貯めた REN の火力1行あたりに足す点
@@ -179,6 +186,7 @@ impl Default for Weights {
             mini_spin_clears: [0.0, -1.5, -1.0],
             spin_clears: [0.0, 1.0, 4.0, 6.0],
             back_to_back_clear: 1.0,
+            back_to_back_broken: 0.0,
             combo_attack: 1.5,
             perfect_clear: 15.0,
             perfect_clear_override: true,
@@ -202,6 +210,8 @@ impl Default for Weights {
             tst_slot: 0.0,
             c_spin: 0.0,
             template_piece: 8.0,
+            opening_tsd: 12.0,
+            tst_slot_low: 0.0,
             rival_ren: 0.0,
             rush_attack: 0.0,
         }
@@ -217,6 +227,9 @@ pub fn reward(w: &Weights, rules: &Rules, mv: &Move, result: &ClearResult) -> f3
     if !result.perfect_clear || !w.perfect_clear_override {
         if result.back_to_back {
             r += w.back_to_back_clear;
+        }
+        if result.back_to_back_broken {
+            r += w.back_to_back_broken;
         }
         let lines = result.lines as usize;
         r += match result.spin {
@@ -269,6 +282,9 @@ pub fn evaluate(w: &Weights, rules: &Rules, board: &Board, back_to_back: bool, c
     }
     if w.tst_slot != 0.0 {
         e += w.tst_slot * shape::tst_slots(board).len().min(2) as f32;
+    }
+    if w.tst_slot_low != 0.0 && board.max_height() <= 10 {
+        e += w.tst_slot_low * shape::tst_slots(board).len().min(2) as f32;
     }
     if w.c_spin != 0.0 {
         e += w.c_spin * shape::c_spins(board).min(1) as f32;

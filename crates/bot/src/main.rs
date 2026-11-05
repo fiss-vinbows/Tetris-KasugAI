@@ -37,10 +37,9 @@ use std::time::Instant;
 use serde_json::{json, Value};
 use tetrisai_core::{Board, Piece, Placement, PlayerState, Rules};
 use tetrisai_engine::{
-    search, IncomingGarbage, OpeningTracker, Opponent, Root, SearchOptions, SearchResult, StrategyTracker, Weights,
+    search, IncomingGarbage, OpeningMode, OpeningTracker, Opponent, Root, SearchOptions, SearchResult, StrategyTracker, Weights,
 };
 
-const PLAN_LEN: usize = 5;
 const MAX_CANDIDATES: usize = 5;
 
 struct Best {
@@ -51,6 +50,8 @@ struct Best {
     width: usize,
     /// 狙い筋の文言(TBP の拡張 `aim`。TBA の情報パネルの「狙い」に出す)
     aim: String,
+    /// C4W で続けられる REN の見込み(TBP の拡張 `c4w_ren`。2026-11-05)
+    c4w_ren: u32,
 }
 
 #[derive(Default)]
@@ -91,7 +92,15 @@ fn main() {
     let rules = Rules::ppt2();
     // 【2026-11-01・ユーザー】序盤は TD系テンプレか素の状態をランダムで選ぶ(空の盤面を受け取るたびに選び直す)
     let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
-    let mut opening = (!args.iter().any(|a| a == "--no-opening")).then(|| OpeningTracker::new(seed));
+    // 【2026-11-05・ユーザー】全自動の設定で開幕に目指すものを選ぶ(--opening default|random|td|tsd|seed3)
+    let mode = match arg_value(&args, "--opening") {
+        Some(s) => OpeningMode::parse(s).unwrap_or_else(|| {
+            eprintln!("--opening の値が分かりません: {s}");
+            std::process::exit(1);
+        }),
+        None => OpeningMode::default(),
+    };
+    let mut opening = (!args.iter().any(|a| a == "--no-opening")).then(|| OpeningTracker::with_mode(seed, mode));
     let mut observe = |root: &mut Root| {
         if let Some(tracker) = opening.as_mut() {
             root.opening = tracker.observe(root, &rules);
@@ -234,7 +243,9 @@ fn worker(bot: &Bot, weights: &Weights, rules: &Rules, max_width: usize, specula
                 break;
             }
             let aim = tetrisai_engine::aim::describe(&root, &result.plan, rules);
-            s.best = Some(Best { result, nodes, nps, width, aim });
+            let rows = tetrisai_engine::shape::ren_rows(&root.state.board);
+            let c4w_ren = if rows > 0 { root.state.consecutive_clears + rows } else { 0 };
+            s.best = Some(Best { result, nodes, nps, width, aim, c4w_ren });
             drop(s);
             width *= 2;
         }
@@ -250,7 +261,7 @@ fn suggestion(best: Option<&Best>) -> Value {
     json!({
         "type": "suggestion",
         "moves": candidates.iter().map(|c| c.mv.placement).collect::<Vec<_>>(),
-        "plan": r.plan.iter().take(PLAN_LEN).map(|m| m.placement).collect::<Vec<_>>(),
+        "plan": r.plan.iter().map(|m| m.placement).collect::<Vec<_>>(),
         "move_info": {
             "nodes": best.nodes,
             "nps": best.nps,
@@ -258,6 +269,7 @@ fn suggestion(best: Option<&Best>) -> Value {
         },
         // 【2026-11-01・ユーザー】狙い筋(TBA の情報パネルの「狙い」)。改行で2行まで
         "aim": best.aim,
+        "c4w_ren": best.c4w_ren,
         "difficulty": candidates.iter().map(|c| json!({
             "soft_drop_sections": c.mv.soft_drop_sections,
             "mid_air_stops": c.mv.mid_air_stops,

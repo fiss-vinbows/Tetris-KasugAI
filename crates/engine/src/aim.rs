@@ -31,7 +31,8 @@ fn describe_plan(root: &Root, plan: &[Move], rules: &Rules) -> String {
     match &root.opening {
         // 1行目はテンプレの名前だけにする(長い名前「タンドリーチキン積み」でも1行に収まるように)
         Opening::Template(t) => return format!("{}\nテンプレ・Tスピンを撃つまで", t.name),
-        Opening::Plain => return "序盤(素の状態)\n中あけRENは組まない".to_string(),
+        Opening::Plain => return "序盤(素の状態)\nC4Wは組まない".to_string(),
+        Opening::Tsd => return "開幕TSD\nTSD を撃つまで".to_string(),
         Opening::None => {}
     }
     let board = root.state.board;
@@ -42,11 +43,11 @@ fn describe_plan(root: &Root, plan: &[Move], rules: &Rules) -> String {
     if rows > 0 {
         let first_clears = clears.first().is_some_and(|c| c.lines > 0);
         if root.state.consecutive_clears > 0 || first_clears {
-            return format!("中あけREN 撃ち中\n毎手1ライン消す(残り{rows}行)");
+            return format!("C4W 撃ち中\n毎手1ライン消す(残り{rows}行)");
         }
         let seed = shape::center_well_seed(&board) % 4;
         let fire = ren_potential(rules, &board, 0);
-        return format!("中あけREN 貯め中\n種{seed}・{rows}行(撃てば火力{fire})");
+        return format!("C4W 貯め中\n種{seed}・{rows}行(撃てば火力{fire})");
     }
     for (i, c) in clears.iter().enumerate() {
         if c.lines == 0 {
@@ -99,7 +100,7 @@ mod tests {
         let r = Root { opening: Opening::Template(template), ..Default::default() };
         assert_eq!(describe(&r, &[], &rules), "ホットケーキ積み\nテンプレ・Tスピンを撃つまで");
         let r = Root { opening: Opening::Plain, ..Default::default() };
-        assert_eq!(describe(&r, &[], &rules), "序盤(素の状態)\n中あけRENは組まない");
+        assert_eq!(describe(&r, &[], &rules), "序盤(素の状態)\nC4Wは組まない");
     }
 
     #[test]
@@ -110,14 +111,14 @@ mod tests {
         let r = root(&rows);
         // 消さない手なら貯め中(種3・8行。REN 表 0+0+1+1+2+2+3+3 = 12)
         let keep = find_move(&r, Piece::O, 0, Spin::None);
-        assert_eq!(describe(&r, &[keep], &rules), "中あけREN 貯め中\n種3・8行(撃てば火力12)");
+        assert_eq!(describe(&r, &[keep], &rules), "C4W 貯め中\n種3・8行(撃てば火力12)");
         // 1ライン消す手なら撃ち中
         let fire = find_move(&r, Piece::I, 1, Spin::None);
-        assert_eq!(describe(&r, &[fire], &rules), "中あけREN 撃ち中\n毎手1ライン消す(残り8行)");
+        assert_eq!(describe(&r, &[fire], &rules), "C4W 撃ち中\n毎手1ライン消す(残り8行)");
         // REN の途中(前の手で消した)なら、読み筋によらず撃ち中
         let mut during = r.clone();
         during.state.consecutive_clears = 2;
-        assert_eq!(describe(&during, &[keep], &rules), "中あけREN 撃ち中\n毎手1ライン消す(残り8行)");
+        assert_eq!(describe(&during, &[keep], &rules), "C4W 撃ち中\n毎手1ライン消す(残り8行)");
     }
 
     #[test]

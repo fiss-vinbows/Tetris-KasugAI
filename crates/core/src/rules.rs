@@ -113,6 +113,8 @@ pub struct ClearResult {
     pub perfect_clear: bool,
     /// B2B のボーナスが付いたか。
     pub back_to_back: bool,
+    /// 続いていた B2B を普通の消去で切ったか(2026-11-05)。
+    pub back_to_back_broken: bool,
     /// この手での REN 数(消していなければ 0)。
     pub ren: u32,
     /// この手で生まれた攻撃量(相殺前)。
@@ -136,6 +138,7 @@ impl PlayerState {
 
         let hard = lines >= 4 || placement.spin != Spin::None;
         let back_to_back = hard && self.back_to_back;
+        let back_to_back_broken = !hard && self.back_to_back;
         self.back_to_back = hard;
         self.consecutive_clears += 1;
         let ren = self.consecutive_clears - 1;
@@ -145,7 +148,7 @@ impl PlayerState {
         let b2b = if back_to_back { rules.attack.back_to_back_bonus } else { 0 };
         let attack = base + b2b + rules.combo_attack(ren);
 
-        ClearResult { lines, spin: placement.spin, perfect_clear, back_to_back, ren, attack }
+        ClearResult { lines, spin: placement.spin, perfect_clear, back_to_back, back_to_back_broken, ren, attack }
     }
 }
 
