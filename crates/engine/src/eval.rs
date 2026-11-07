@@ -88,6 +88,22 @@ pub struct Weights {
     pub center_well_side_diff: f32,
     /// 中あけの上(空中)に TSD の溝がある
     pub air_tsd_slot: f32,
+    /// 手を探す時の出現位置を、実機よりこの行数だけ低く見る(出せない時は本来の位置)。
+    /// 【2026-11-07・実機 debug_log_20261106_213612】列ずれ13手はすべて高い盤面で起きていた。壁の上すれすれを横切る手は、
+    /// 入力の間に1段落ちたりせり上がったりすると壁に止められ、中央へ落ちて C4W が崩れる。読みの段階で通らない手として扱う。
+    pub spawn_margin: u32,
+    /// 中あけが残っている(`shape::ren_rows` の見積もりが2行以上)のに、続いていた REN を消さない手で切った
+    /// (2026-11-07。少しだけ消して積み直すのを減らす)
+    pub ren_cut: f32,
+    /// 重ねた TSD の溝(ダブルダガーなど)の2つ目以降1つあたり。【2026-11-07・ユーザー】盤面が低い時は TSD のソフトドロップに
+    /// 時間がかかるので、すぐ撃たずに溝をためて、相手の攻撃を受けてからカウンターする
+    pub tsd_stock: f32,
+    /// 予告が無く、盤面が `tsd_hold_height` 以下の時に TSD を撃った手
+    pub tsd_low_fire: f32,
+    /// 予告があるのに TSD・TST を撃った手(受けてからのカウンター)
+    pub tsd_counter: f32,
+    /// `tsd_low_fire` で「低い」とみなす高さ
+    pub tsd_hold_height: u32,
     /// 中央4列の底に種3(中央4列の3マス)がある(2026-11-01。左右が埋まる前の、対局の始めにしか作れない。
     /// 中あけの火力はその4〜5手先まで見えないので、種を置いておく価値をここで付ける)
     pub center_well_seed: f32,
@@ -201,6 +217,12 @@ impl Default for Weights {
             center_well_rows: 0.0,
             center_well_side_diff: 0.0,
             air_tsd_slot: 0.0,
+            spawn_margin: 0,
+            ren_cut: 0.0,
+            tsd_stock: 0.0,
+            tsd_low_fire: 0.0,
+            tsd_counter: 0.0,
+            tsd_hold_height: 8,
             center_well_seed: 0.0,
             ren_potential: 0.0,
             tsd_slot_any: 0.0,
@@ -289,6 +311,9 @@ pub fn evaluate(w: &Weights, rules: &Rules, board: &Board, back_to_back: bool, c
     if w.c_spin != 0.0 {
         e += w.c_spin * shape::c_spins(board).min(1) as f32;
     }
+    if w.tsd_stock != 0.0 {
+        e += w.tsd_stock * tsd_chain(board).saturating_sub(1) as f32;
+    }
 
     // T溝: 見つかった溝に T を入れたと仮定し、消える行数で点を付ける(2行以上消えるなら消して次を探す)
     let mut b = *board;
@@ -372,6 +397,43 @@ fn center_well_value(w: &Weights, rules: &Rules, board: &Board, ctx: &EvalContex
         e += w.ren_potential * ren_potential(rules, board, ctx.consecutive_clears) as f32;
     }
     e
+}
+
+/// TSD・TST を撃つタイミングの点。`height` は置く前の盤面の高さ(せり上がった分を含む)、`pending` は置く前の予告の行数。
+pub fn tsd_fire_value(w: &Weights, result: &ClearResult, height: u32, pending: u32) -> f32 {
+    if result.spin != Spin::Full || result.lines < 2 {
+        return 0.0;
+    }
+    if pending > 0 {
+        w.tsd_counter
+    } else if result.lines == 2 && height <= w.tsd_hold_height {
+        w.tsd_low_fire
+    } else {
+        0.0
+    }
+}
+
+/// T を順に入れていった時に使える TSD の溝の数(3つまで)。
+pub fn tsd_chain(board: &Board) -> u32 {
+    let mut b = *board;
+    for n in 0..3 {
+        let Some(loc) = tslot_left(&b).or_else(|| tslot_right(&b)) else { return n };
+        b.place(&loc);
+        let full = b.full_lines();
+        if full.count_ones() != 2 {
+            return n;
+        }
+        b.remove_lines(full);
+    }
+    3
+}
+
+/// 中あけが残っている(`shape::ren_rows` の見積もりが2行以上)のに REN を切った手の点。`prior` はこの手の前に続いていた消去の回数、`board` は置いた後の盤面。
+pub fn ren_cut_value(w: &Weights, prior: u32, lines: u32, board: &Board) -> f32 {
+    if w.ren_cut == 0.0 || prior == 0 || lines > 0 || shape::ren_rows(board) < 2 {
+        return 0.0;
+    }
+    w.ren_cut
 }
 
 /// 中あけに貯めた REN の火力(行数)。今の REN(`consecutive_clears` 回続けて消した)の続きから、
@@ -668,6 +730,36 @@ mod tests {
         let err = toml::from_str::<Weights>("holes = -1.0\ncenter_wel_rows = 3.0\n").unwrap_err().to_string();
         assert!(err.contains("center_wel_rows"), "{err}");
         assert!(serde_json::from_str::<Weights>(r#"{"holes": -1.0, "jeopardy": 1.0}"#).is_err());
+    }
+
+    #[test]
+    fn ren_cut_only_when_well_remains() {
+        // REN が続いていて、消さず、中あけが2行以上残る時だけ減点する
+        let w = Weights { ren_cut: -20.0, ..Weights::default() };
+        let well = Board::from_rows(&["###....###", "###....###", "###.######"]);
+        assert_eq!(ren_cut_value(&w, 2, 0, &well), -20.0);
+        assert_eq!(ren_cut_value(&w, 0, 0, &well), 0.0, "REN が無ければ切っていない");
+        assert_eq!(ren_cut_value(&w, 2, 1, &well), 0.0, "消した手は切っていない");
+        assert_eq!(ren_cut_value(&w, 2, 0, &Board::from_rows(&["###.######"])), 0.0, "中あけが残っていなければ自然な終わり");
+    }
+
+    #[test]
+    fn tsd_fire_prefers_after_being_attacked() {
+        let w = Weights { tsd_low_fire: -6.0, tsd_counter: 3.0, tsd_hold_height: 8, ..Weights::default() };
+        let tsd = ClearResult { spin: Spin::Full, lines: 2, ..Default::default() };
+        assert_eq!(tsd_fire_value(&w, &tsd, 5, 0), -6.0, "低くて予告が無ければ、ためる");
+        assert_eq!(tsd_fire_value(&w, &tsd, 12, 0), 0.0, "高ければ減点しない");
+        assert_eq!(tsd_fire_value(&w, &tsd, 5, 4), 3.0, "予告があればカウンター");
+        let tss = ClearResult { spin: Spin::Full, lines: 1, ..Default::default() };
+        assert_eq!(tsd_fire_value(&w, &tss, 5, 0), 0.0);
+    }
+
+    #[test]
+    fn tsd_chain_counts_stacked_slots() {
+        assert_eq!(tsd_chain(&Board::default()), 0);
+        // 左に屋根がある TSD の溝1つ(CC2 の形)
+        let one = Board::from_rows(&["##........", "#...######", "##.#######"]);
+        assert_eq!(tsd_chain(&one), 1);
     }
 
     #[test]

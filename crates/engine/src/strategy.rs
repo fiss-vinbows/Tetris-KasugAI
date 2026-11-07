@@ -23,6 +23,10 @@ pub const OPPONENT_C4W_ROWS: u32 = 3;
 pub const RIVAL_MARGIN: u32 = 2;
 /// 自分の盤面がこの段数以下なら、これから C4W を育てて対抗できるとみなす
 pub const RIVAL_LOW_HEIGHT: u32 = 6;
+/// 自分の C4W がこの行数以上あれば、早撃ちにはしない(貯めた分を撃ち切る)。
+/// 【2026-11-07・ユーザー「C4W から REN を切らさずに発火してほしいが、積みなおしたり真ん中に置いて TSD に変えてしまう」】
+/// 早撃ちは中あけの評価を丸ごと消すので、育てた C4W まで埋めてしまう
+pub const KEEP_OWN_C4W_ROWS: u32 = 3;
 /// 同じ判断がこの回数続いたら作戦を切り替える
 pub const SWITCH_AFTER: u32 = 3;
 
@@ -56,7 +60,7 @@ pub fn decide(own: &Board, opponent: Option<&Board>) -> (Strategy, u32, u32) {
     if theirs < OPPONENT_C4W_ROWS {
         return (Strategy::Normal, theirs, ours);
     }
-    let rival = (ours > 0 && ours + RIVAL_MARGIN >= theirs) || (ours == 0 && own.max_height() <= RIVAL_LOW_HEIGHT && theirs <= 5);
+    let rival = ours >= KEEP_OWN_C4W_ROWS || (ours > 0 && ours + RIVAL_MARGIN >= theirs) || (ours == 0 && own.max_height() <= RIVAL_LOW_HEIGHT && theirs <= 5);
     (if rival { Strategy::C4WRival } else { Strategy::Rush }, theirs, ours)
 }
 
@@ -123,7 +127,8 @@ mod tests {
     #[test]
     fn 相手のc4wが大きく育っていたら早撃ち() {
         assert_eq!(decide(&Board::from_rows(&["####..####"; 2]), Some(&c4w(9))), (Strategy::Rush, 10, 0));
-        assert_eq!(decide(&c4w(2), Some(&c4w(9))).0, Strategy::Rush, "自分の C4W が小さすぎる");
+        assert_eq!(decide(&c4w(1), Some(&c4w(9))).0, Strategy::Rush, "自分の C4W が小さすぎる");
+        assert_eq!(decide(&c4w(3), Some(&c4w(12))).0, Strategy::C4WRival, "育てた C4W は早撃ちで埋めない");
     }
 
     #[test]

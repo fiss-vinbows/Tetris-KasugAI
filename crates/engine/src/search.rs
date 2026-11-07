@@ -25,9 +25,9 @@ use std::collections::HashMap;
 use crate::opening::Opening;
 use crate::strategy::Strategy;
 use crate::eval::{
-    battle_value, evaluate, opponent_threat, reward, BattleContext, EvalContext, Garbage, Weights,
+    battle_value, evaluate, opponent_threat, reward, ren_cut_value, tsd_fire_value, BattleContext, EvalContext, Garbage, Weights,
 };
-use tetrisai_core::{generate_into, Board, ClearResult, Move, Piece, Placement, PlayerState, Rules};
+use tetrisai_core::{generate_into, Board, ClearResult, Move, Piece, Placement, PlayerState, Rules, Spawn};
 
 /// 予告の1件(相手の1回の攻撃)。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -215,6 +215,17 @@ fn garbage_after(
     (consumed, risen)
 }
 
+/// 出現位置を `margin` 行だけ低く見て手を探す。そこから出せない(手が無い)時は、本来の出現位置で探す。
+fn generate_safe(board: &Board, piece: Piece, spawn: Spawn, margin: u32, out: &mut Vec<Move>) {
+    if margin > 0 {
+        generate_into(board, piece, Spawn { x: spawn.x, y: spawn.y - margin as i8 }, out);
+        if !out.is_empty() {
+            return;
+        }
+    }
+    generate_into(board, piece, spawn, out);
+}
+
 /// 探索する。`cancelled` が true を返したら途中でやめて None を返す。
 /// 置ける手が1つも無い(負け)ときも None。
 pub fn search(
@@ -285,14 +296,26 @@ pub fn search(
             }
 
             for &(piece, hold, next) in &options_here[..count] {
-                generate_into(&parent.state.board, piece, spawn, &mut moves);
+                generate_safe(&parent.state.board, piece, spawn, weights.spawn_margin, &mut moves);
                 for mv in &moves {
                     if mv.placement.location.cells().iter().all(|&(_, y)| y >= LOCK_OUT_Y) {
                         continue;
                     }
                     let mut state = parent.state;
                     let result = state.apply(&mv.placement, rules);
-                    let mut r = parent.reward + reward(weights, rules, mv, &result);
+                    let mut r = parent.reward
+                        + reward(weights, rules, mv, &result)
+                        + ren_cut_value(weights, parent.state.consecutive_clears, result.lines, &state.board)
+                        + if root.opening.is_active() {
+                            0.0
+                        } else {
+                            tsd_fire_value(
+                                weights,
+                                &result,
+                                parent.state.board.max_height() + parent.risen,
+                                incoming_total - parent.consumed,
+                            )
+                        };
                     // 序盤のテンプレ: 図どおりの手に加点する。ラインを消したら(撃ったら)テンプレは終わり
                     let mut on_template = false;
                     if let (true, Opening::Template(t)) = (parent.on_template, &root.opening) {
@@ -407,7 +430,7 @@ pub fn search(
                 let mut best = f32::NEG_INFINITY;
                 // 来たミノか HOLD のミノのどちらかを置ける
                 for use_piece in [Some(piece), node.hold.filter(|&h| h != piece)].into_iter().flatten() {
-                    generate_into(&node.state.board, use_piece, spawn, &mut moves);
+                    generate_safe(&node.state.board, use_piece, spawn, weights.spawn_margin, &mut moves);
                     for mv in &moves {
                         if mv.placement.location.cells().iter().all(|&(_, y)| y >= LOCK_OUT_Y) {
                             continue;
@@ -436,6 +459,17 @@ pub fn search(
                         };
                         let s = node.reward
                             + reward(weights, rules, mv, &result)
+                            + ren_cut_value(weights, node.state.consecutive_clears, result.lines, &state.board)
+                            + if root.opening.is_active() {
+                                0.0
+                            } else {
+                                tsd_fire_value(
+                                    weights,
+                                    &result,
+                                    node.state.board.max_height() + node.risen,
+                                    incoming_total - node.consumed,
+                                )
+                            }
                             + evaluate(weights, rules, &state.board, state.back_to_back, &ctx)
                             + battle_value(weights, &battle, outgoing, our_top);
                         nodes += 1;

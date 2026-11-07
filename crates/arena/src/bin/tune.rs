@@ -193,6 +193,8 @@ fn main() {
         think: Duration::ZERO,
         max_pieces: num("--max-pieces", 300.0) as u32,
         adjudicate: true,
+        block_margin: num("--block-margin", 0.0) as u32,
+        timed: args.iter().any(|a| a == "--timed"),
     };
 
     let base = match get("--init") {

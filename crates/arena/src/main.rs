@@ -127,6 +127,8 @@ fn main() {
         think: Duration::from_millis(num("--think-ms", 100)),
         max_pieces: num("--max-pieces", 500) as u32,
         adjudicate: args.iter().any(|a| a == "--adjudicate"),
+        block_margin: num("--block-margin", 0) as u32,
+        timed: args.iter().any(|a| a == "--timed"),
     });
     let mut record = get("--record").map(|path| File::create(path).expect("記録ファイルを作れない"));
 
@@ -263,6 +265,11 @@ fn summary(names: &[String; 2], results: &[GameResult]) {
         ];
         let label: String = format!("{}:{}", ["A", "B"][side], name).chars().take(8).collect();
         println!("{label:>8}{}", cols.iter().map(|v| format!("{v:>8.2}")).collect::<String>());
+        println!(
+            "  TSD の内訳 {label}: 予告あり {:.2} / 予告なしで低い {:.2}",
+            avg(&|s| s.tsd_with_incoming),
+            avg(&|s| s.tsd_low_quiet)
+        );
     }
 
     println!();

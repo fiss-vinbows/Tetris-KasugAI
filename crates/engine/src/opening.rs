@@ -226,6 +226,8 @@ pub enum OpeningMode {
     TemplateOrPlain,
     /// TDテンプレ・開幕TSD・種3C4W から均等に選ぶ
     Random,
+    /// TDテンプレ・開幕TSD から均等に選ぶ(種3C4W を除く。2026-11-07・ユーザー)
+    RandomNoC4w,
     /// TDテンプレ(組めるものが無ければ素の状態)
     Td,
     /// 開幕TSD
@@ -240,6 +242,7 @@ impl OpeningMode {
         match s {
             "default" => Some(Self::TemplateOrPlain),
             "random" => Some(Self::Random),
+            "no_c4w" => Some(Self::RandomNoC4w),
             "td" => Some(Self::Td),
             "tsd" => Some(Self::Tsd),
             "seed3" => Some(Self::Seed3),
@@ -324,6 +327,7 @@ impl OpeningTracker {
     fn choose(&mut self, root: &Root, rules: &Rules) {
         let mode = match self.mode {
             OpeningMode::Random => [OpeningMode::Td, OpeningMode::Tsd, OpeningMode::Seed3][(self.next_random() % 3) as usize],
+            OpeningMode::RandomNoC4w => [OpeningMode::Td, OpeningMode::Tsd][(self.next_random() % 2) as usize],
             mode => mode,
         };
         self.state = State::Plain(0);
@@ -373,6 +377,20 @@ fn count(board: &Board) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_c4w_mode_never_chooses_seed3() {
+        // 種3C4W を選ぶと State::Done になる。開幕C4Wを除く設定では必ず TD 系か開幕TSD か素の状態になる
+        assert_eq!(OpeningMode::parse("no_c4w"), Some(OpeningMode::RandomNoC4w));
+        let rules = Rules::ppt2();
+        let queue = [Piece::I, Piece::O, Piece::T, Piece::S, Piece::Z, Piece::J];
+        let root = Root { hold: None, queue: queue.to_vec(), ..Root::default() };
+        for seed in 1..200 {
+            let mut tracker = OpeningTracker::with_mode(seed, OpeningMode::RandomNoC4w);
+            tracker.choose(&root, &rules);
+            assert_ne!(tracker.state, State::Done, "種 {seed}");
+        }
+    }
 
     #[test]
     fn td系テンプレ5種を読める() {

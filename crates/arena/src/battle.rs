@@ -89,6 +89,9 @@ pub struct Stats {
     pub max_ren: u32,
     /// ソフトドロップが必要だった手の数
     pub soft_drop_moves: u32,
+    /// TSD のうち、予告があった時の数 / 予告が無く盤面が8以下だった時の数(ため込みの確認用)
+    pub tsd_with_incoming: u32,
+    pub tsd_low_quiet: u32,
     /// そのうち Tスピン(TSS・TSD・TST)でない手の数(2026-11-03)
     pub soft_drop_non_spin: u32,
     /// ラインを消した手の数(実機ではライン消去の演出 約0.7秒を待つ。2026-11-01 全自動の速さの比較用)
@@ -99,6 +102,8 @@ pub struct Stats {
     pub b2b_breaks_in_ren: u32,
     /// そのうち1列消しで切った回数
     pub b2b_breaks_single: u32,
+    /// 壁の上を通れず、別の場所に落ちた手の数(`Player::block_margin`。2026-11-07)
+    pub blocked: u32,
 }
 
 /// 1手置いた結果。
@@ -112,6 +117,10 @@ pub struct Outcome {
     pub used_hold: bool,
     /// この手で NEXT に新しく見えたミノの数
     pub revealed: usize,
+    /// 予定の場所へ届かず、別の場所に落ちたか(bot に局面を渡し直す必要がある)
+    pub blocked: bool,
+    /// この手にかかる実機の時間(ms)の目安(`GameConfig::timed` で使う)
+    pub move_ms: u32,
 }
 
 pub struct Player {
@@ -127,6 +136,9 @@ pub struct Player {
     hole_rng: StdRng,
     pub stats: Stats,
     pub loss: Option<Loss>,
+    /// 実機の「壁に止められる」を再現する: 出現位置よりこの行数だけ低い位置から届かない手は、届く範囲の一番近い列に落ちる。
+    /// 0 なら再現しない(2026-11-07)
+    pub block_margin: u32,
 }
 
 impl Player {
@@ -142,6 +154,7 @@ impl Player {
             hole_rng: StdRng::seed_from_u64(hole_seed),
             stats: Stats::default(),
             loss: None,
+            block_margin: 0,
         };
         p.refill(sequence);
         p
@@ -217,10 +230,32 @@ impl Player {
         let moves = generate(&self.state.board, piece, rules.spawn());
         let mut matching = moves.iter().filter(|m| m.placement.location.sorted_cells() == cells);
         let first = matching.next().copied().ok_or(Loss::IllegalMove)?;
-        let mv = std::iter::once(first)
+        let mut mv = std::iter::once(first)
             .chain(matching.copied())
             .find(|m| m.placement.spin == suggested.spin)
             .unwrap_or(first);
+        let mut blocked = false;
+        if self.block_margin > 0 {
+            let spawn = rules.spawn();
+            let low = generate(&self.state.board, piece, tetrisai_core::Spawn { x: spawn.x, y: spawn.y - self.block_margin as i8 });
+            if !low.is_empty() && !low.iter().any(|m| m.placement.location.sorted_cells() == cells) {
+                // 同じ向きのまま、一番近い列へハードドロップしたことにする
+                let target = suggested.location;
+                let near = low
+                    .iter()
+                    .filter(|m| m.soft_drop_sections == 0)
+                    .min_by_key(|m| {
+                        let l = m.placement.location;
+                        ((l.x - target.x).abs() as i32) * 2 + (l.rotation != target.rotation) as i32 * 100
+                    })
+                    .copied();
+                if let Some(near) = near {
+                    mv = near;
+                    blocked = true;
+                    self.stats.blocked += 1;
+                }
+            }
+        }
         if mv.placement.location.cells().iter().all(|&(_, y)| y >= LOCK_OUT_Y) {
             return Err(Loss::LockOut);
         }
@@ -238,6 +273,8 @@ impl Player {
         }
         let revealed = self.refill(sequence);
 
+        let height_before = self.state.board.max_height();
+        let incoming_before = self.incoming_lines();
         let had_b2b = self.state.back_to_back;
         let result = self.state.apply(&mv.placement, rules);
         let s = &mut self.stats;
@@ -258,13 +295,23 @@ impl Player {
         match (result.spin, result.lines) {
             (Spin::None, 4) => s.tetrises += 1,
             (Spin::Full, 1) => s.tspin_singles += 1,
-            (Spin::Full, 2) => s.tspin_doubles += 1,
+            (Spin::Full, 2) => {
+                s.tspin_doubles += 1;
+                s.tsd_with_incoming += (incoming_before > 0) as u32;
+                s.tsd_low_quiet += (incoming_before == 0 && height_before <= 8) as u32;
+            }
             (Spin::Full, 3) => s.tspin_triples += 1,
             (Spin::Mini, 1..) => s.tspin_minis += 1,
             _ => {}
         }
 
-        let mut outcome = Outcome { used_hold, revealed, ..Default::default() };
+        // 【2026-11-07・実機 debug_log_20261107_150112(約2,000手)の中央値に当てはめた】ハードドロップの手 370ms、
+        // 消すと演出で +650ms、ソフトドロップは接地の待ちなどで +300ms と1段 25ms
+        let drop_rows = (rules.spawn().y - mv.placement.location.y).max(0) as u32;
+        let move_ms = 370
+            + if result.lines > 0 { 650 } else { 0 }
+            + if mv.soft_drop_sections > 0 { 300 + 25 * drop_rows } else { 0 };
+        let mut outcome = Outcome { used_hold, revealed, blocked, move_ms, ..Default::default() };
         if result.lines > 0 {
             let mut attack = result.attack;
             if rules.garbage.cancel_incoming_first {

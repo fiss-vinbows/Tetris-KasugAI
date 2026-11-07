@@ -77,6 +77,10 @@ pub struct EngineAgent {
     pub speculate: bool,
     /// 序盤の作戦(TD系テンプレか素の状態をランダムで選ぶ)。None なら使わない
     pub opening: Option<OpeningTracker>,
+    /// start で REN と B2B を伝えない(実機の TBA の古い動きを再現する実験用。2026-11-07)
+    pub forget_on_start: bool,
+    /// 予告の時間差を伝えない(実機の TBA は delay 0 で送る)
+    pub incoming_without_delay: bool,
     /// 作戦層(相手の情報を使うとき、相手の C4W を見て作戦を選ぶ)
     strategy: StrategyTracker,
     root: Option<Root>,
@@ -93,6 +97,8 @@ impl EngineAgent {
             use_opponent: true,
             speculate: false,
             opening: None,
+            forget_on_start: false,
+            incoming_without_delay: false,
             strategy: StrategyTracker::default(),
             root: None,
         }
@@ -100,6 +106,11 @@ impl EngineAgent {
 }
 
 impl EngineAgent {
+    /// 今の作戦(道具で数えるため)。
+    pub fn strategy_now(&self) -> tetrisai_engine::Strategy {
+        self.strategy.current()
+    }
+
     /// 局面が変わったら、序盤の作戦を選ぶ・進める・終える。
     fn observe_opening(&mut self) {
         if let (Some(tracker), Some(root)) = (self.opening.as_mut(), self.root.as_mut()) {
@@ -113,7 +124,11 @@ impl Agent for EngineAgent {
         // 袋の切れ目(7個まるごと残っている)は「次は新しい袋」なので空にする
         let bag = if bag_state.len() == 7 { Vec::new() } else { bag_state.to_vec() };
         self.root = Some(Root {
-            state: PlayerState { ..player.state },
+            state: if self.forget_on_start {
+                PlayerState { board: player.state.board, back_to_back: false, consecutive_clears: 0 }
+            } else {
+                PlayerState { ..player.state }
+            },
             hold: player.hold,
             queue: player.queue.iter().copied().collect(),
             incoming: Vec::new(),
@@ -127,7 +142,7 @@ impl Agent for EngineAgent {
     fn update_battle(&mut self, view: &BattleView) -> io::Result<()> {
         let Some(root) = self.root.as_mut() else { return Ok(()) };
         if self.use_incoming {
-            root.incoming = view.incoming.iter().map(|g| IncomingGarbage { lines: g.lines, delay: g.delay }).collect();
+            root.incoming = view.incoming.iter().map(|g| IncomingGarbage { lines: g.lines, delay: if self.incoming_without_delay { 0 } else { g.delay } }).collect();
         }
         if self.use_opponent {
             root.gauge = view.gauge;

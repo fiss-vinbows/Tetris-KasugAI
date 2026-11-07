@@ -24,6 +24,10 @@ pub struct GameConfig {
     /// 手数の上限に達したら、危なさ(盤面の高さ + 残っている予告の行数)の小さいほうを勝ちにする。
     /// 自動調整で引き分けを減らすために使う(引き分けからは勝敗の手がかりが得られないため)
     pub adjudicate: bool,
+    /// 実機の「壁に止められる」を再現する行数(`Player::block_margin`)。0 なら再現しない
+    pub block_margin: u32,
+    /// 手にかかる実機の時間を数え、遅れている側だけが置く(2026-11-07。ソフトドロップ・消去の演出が遅いことを再現する)
+    pub timed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -47,14 +51,23 @@ pub fn play_game(bots: [&mut dyn Agent; 2], seed: u64, config: &GameConfig) -> i
     // おじゃまの穴の位置も両者で同じ乱数の列にする
     let hole_seed = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xA5A5;
     let mut players = [Player::new(&mut sequence, hole_seed), Player::new(&mut sequence, hole_seed)];
+    players[0].block_margin = config.block_margin;
+    players[1].block_margin = config.block_margin;
     let mut needs_start = [true, true];
     let mut last: [Option<(Placement, Vec<Piece>)>; 2] = [None, None];
 
     let [a, b] = bots;
     let mut bots = [a, b];
 
+    // 対局の開始からの時間(ms)。timed でなければ両者とも毎回置く
+    let mut clock = [0u32; 2];
+
     for _turn in 0..config.max_pieces {
+        let active = [!config.timed || clock[0] <= clock[1], !config.timed || clock[1] <= clock[0]];
         for i in 0..2 {
+            if !active[i] {
+                continue;
+            }
             if needs_start[i] {
                 let bag_state = players[i].bag_state(&mut sequence);
                 bots[i].start(&players[i], &bag_state)?;
@@ -62,6 +75,7 @@ pub fn play_game(bots: [&mut dyn Agent; 2], seed: u64, config: &GameConfig) -> i
             } else if let Some((placement, new_pieces)) = &last[i] {
                 bots[i].play(placement, new_pieces)?;
             }
+            last[i] = None;
             let incoming: Vec<_> = players[i].incoming.iter().copied().collect();
             let view = BattleView { incoming: &incoming, gauge: players[i].gauge, opponent: &players[1 - i] };
             bots[i].update_battle(&view)?;
@@ -72,6 +86,9 @@ pub fn play_game(bots: [&mut dyn Agent; 2], seed: u64, config: &GameConfig) -> i
 
         let mut suggested = [None, None];
         for i in 0..2 {
+            if !active[i] {
+                continue;
+            }
             for _ in 0..SUGGEST_RETRIES {
                 suggested[i] = bots[i].suggest()?;
                 if suggested[i].is_some() {
@@ -83,6 +100,9 @@ pub fn play_game(bots: [&mut dyn Agent; 2], seed: u64, config: &GameConfig) -> i
 
         let mut sends = [0, 0];
         for i in 0..2 {
+            if !active[i] {
+                continue;
+            }
             let Some(placement) = suggested[i] else {
                 let loss = if players[i].has_any_move(rules) { Loss::BotGaveUp } else { Loss::NoMove };
                 players[i].loss = Some(loss);
@@ -90,7 +110,8 @@ pub fn play_game(bots: [&mut dyn Agent; 2], seed: u64, config: &GameConfig) -> i
             };
             if let Ok(outcome) = players[i].place(&placement, rules, &mut sequence) {
                 sends[i] = outcome.send;
-                needs_start[i] = outcome.garbage_rose;
+                clock[i] += outcome.move_ms;
+                needs_start[i] = outcome.garbage_rose || outcome.blocked;
                 let q = &players[i].queue;
                 let new_pieces = q.iter().skip(q.len() - outcome.revealed).copied().collect();
                 last[i] = Some((placement, new_pieces));
