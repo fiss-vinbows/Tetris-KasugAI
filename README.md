@@ -10,19 +10,27 @@
 
 - **手作りの評価関数 + 自動調整**: ビーム探索の評価の重みを、自己対戦(SPSA)で調整します
 - **C4W(中あけ REN)**: 中央4列をあけて積み、REN を切らさずに発火します
-- **Tスピン**: TSD・TST・C-spin の形を評価します
-- **開幕の作戦**: TD系テンプレ・開幕TSD・種3C4W を選べます(`--opening`)
-- **相手を見た作戦**: 相手の盤面と予告から、C4W で対抗するか早撃ちするかを選びます
-- **実機に合わせた対戦シミュレーター**: 壁に止められる手や、ソフトドロップ・消去の演出にかかる時間も再現できます
+- **Tスピン**: TSD・TST・C-spin の形や、テトリスと TSD のどちらでも撃てる形を評価します
+- **開幕の作戦**(`--opening`):
+  - TD系テンプレ(テトリス堂の図。TST→TSD→パフェまで続けます)
+  - 開幕TSD・種3C4W
+  - 開幕パフェ(最初の10ミノで4段を消す。見えていないミノの来方も試して、パフェできる見込みが一番高い置き方を選びます)
+- **相手を見た作戦**: 相手の盤面と予告から、C4W で対抗するか早撃ちするかを選びます。TDテンプレの途中で速攻を受けたら、
+  TSD の後に C4W へ移ります
+- **実機に合わせた対戦シミュレーター**: 壁に止められる手、キー入力・ソフトドロップ・消去の演出にかかる時間、
+  実機に合わせたおじゃまの穴の列の変わり方を再現できます
 
 ## 強さ
 
-対戦シミュレーターでの Cold Clear 2 との対戦です(`config/weights/run11_cut20.toml`、壁に止められる再現あり)。
+対戦シミュレーターでの Cold Clear 2 との対戦です(実機の時間を数える `--timed`、壁に止められる再現あり、序盤は既定)。
 
-| 条件 | 局数 | 勝率 | 95%信頼区間 |
+| 重み | 局数 | 勝率 | 95%信頼区間 |
 |---|---:|---:|---:|
-| 実機の時間を数える(`--timed`) | 1,000 | 77.1% | 74.4〜79.6% |
-| 時間を数えない | 600 | 92.1% | 89.7〜94.0% |
+| `run16`(標準) | 1,000 | 49.8% | 46.8〜52.9% |
+| `run11_cut20`(以前の標準) | 400 | 49.2% | 44.4〜54.1% |
+
+対戦シミュレーターの規則を実機に合わせて直したため(REN 中もせり上がる・おじゃまの穴の列が行ごとに変わる)、以前の
+「77.1%」(`run11_cut20`、v0.1.0 の頃の規則)とは比べられません。今の規則では互角です。
 
 シミュレーターの結果で、実機(ぷよテト2)での勝率ではありません。
 
@@ -43,10 +51,23 @@ cargo build --release -p tetrisai-bot
 `target/release/tetrisai-bot.exe` ができます。標準入出力で TBP を話すので、TBP に対応したクライアントから起動します。重みは `--config` で渡します。
 
 ```bash
-target/release/tetrisai-bot.exe --config config/weights/run11_cut20.toml --opening random
+target/release/tetrisai-bot.exe --config config/weights/run16.toml --opening no_c4w
 ```
 
-`--opening` の値は `default`・`random`・`no_c4w`(開幕C4Wを除く)・`td`・`tsd`・`seed3` です。ほかのオプションは `crates/bot/src/main.rs` の先頭に書いてあります。
+`--opening` の値は `default`・`random`・`no_c4w`(開幕C4Wを除く)・`td`・`tsd`・`seed3`・`pco`(開幕パフェ)です。ほかのオプションは `crates/bot/src/main.rs` の先頭に書いてあります。
+
+TBA で使うプラグインは [Releases](https://github.com/fiss-vinbows/Tetris-KasugAI/releases) にあります。
+
+### 重み
+
+| ファイル | 内容 |
+|---|---|
+| `config/weights/run16.toml` | 標準(TBA で使っている重み) |
+| `config/weights/run16_shape.toml` | run16 + テトリスと TSD の両対応の形を良形にする・パフェの後に C4W に向かわない |
+| `config/weights/run17_td.toml` | TDテンプレを前提にした重み(`--opening td` で使う。速攻を受けたら TSD の後に C4W へ) |
+| `config/weights/run16_rush.toml` | 相手が C4W を目指したら、C4W で対抗せずに攻撃で潰す(早撃ち) |
+
+古い重みも、調べた時の記録として残しています。どれが何かは各ファイルの先頭と [設計書](docs/DESIGN.md) にあります。
 
 ## 構成
 
@@ -74,10 +95,14 @@ cargo test
 
 ```bash
 cargo build --release
-target/release/tetrisai-arena.exe --games 300 --a-weights config/weights/run11_cut20.toml --block-margin 1 --timed --adjudicate
+target/release/tetrisai-arena.exe --games 300 --a-weights config/weights/run16.toml --block-margin 1 --timed --adjudicate
 ```
 
 - `--block-margin 1`: 壁に止められる手を再現します
+- `--a-opening` / `--b-opening`: 序盤の作戦(bot の `--opening` と同じ値)
+- `--a-time-pct` / `--b-time-pct`: 手の時間の倍率(人の相手の遅さを再現します)
+- `--b-incoming-lag`: 予告に気づくまでの遅れ(手の数)
+- 環境変数 `ARENA_TRACE=<種>|all`: 1手ずつの様子を標準エラーに出します
 - `--timed`: 実機ログに合わせた時間を数え、遅れている側だけが置きます(ソフトドロップや消去の演出の遅さを再現します)
 - 重み同士を比べる時は `--b target/release/tetrisai-bot.exe --b-weights <TOML>` を足します。少ない局数では偶然の差が出るので、`--seed` を変えても確かめます
 
@@ -88,7 +113,7 @@ Cold Clear 2 と対戦するには、隣のフォルダに `../Tetris/external/c
 SPSA で調整します。途中経過は `--out` のフォルダに保存され、続きから再開できます。オプションは `crates/arena/src/bin/tune.rs` の先頭に書いてあります。
 
 ```bash
-target/release/tune.exe --out records/tune_new --init config/weights/run11_cut20.toml --hours 2 --width 128 --games 64 --block-margin 1
+target/release/tune.exe --out records/tune_new --init config/weights/run16.toml --hours 2 --width 128 --games 64 --block-margin 1
 ```
 
 ### C4W の使い方の集計
@@ -96,7 +121,7 @@ target/release/tune.exe --out records/tune_new --init config/weights/run11_cut20
 発火できた割合や、REN を切った手の数を数えます。オプションは `crates/arena/src/bin/c4w_audit.rs` の先頭に書いてあります。
 
 ```bash
-target/release/c4w_audit.exe --weights config/weights/run11_cut20.toml --games 200 --block-margin 1
+target/release/c4w_audit.exe --weights config/weights/run16.toml --games 200 --block-margin 1
 ```
 
 ### 突き合わせ
@@ -134,3 +159,10 @@ cargo run --release --example bench_movegen
 ## TBA との関係
 
 TBA はぷよテト2の画面とメモリを読んで操作する、別のプロジェクトです。このリポジトリの隣のフォルダ(`../Tetris`)に置く前提で、道具の一部が参照しています。TBA は `config/engine.json` で指定した bot と重みを使います。bot を作り直す時は、TBA が古い exe を使っていないか確かめてください。古い exe は新しい重みの項目を読めずにエラーになります。
+
+## ライセンス
+
+[MIT License](LICENSE) です。
+
+ぷよぷよテトリス2 とは関係のない、個人の非公式プロジェクトです。「ぷよぷよテトリス」は株式会社セガの商標です。
+Tetris® は The Tetris Company の商標です。オンライン対戦など、ほかの人と対戦する場で自動操作に使わないでください。
