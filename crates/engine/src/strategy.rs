@@ -42,6 +42,16 @@ pub enum Strategy {
 }
 
 impl Strategy {
+    /// `c4w_response`(Weights)で、相手の C4W への答え方を固定する。
+    pub fn forced(self, response: u32) -> Self {
+        match (self, response) {
+            (Strategy::Normal, _) => Strategy::Normal,
+            (_, 1) => Strategy::C4WRival,
+            (_, 2) => Strategy::Rush,
+            (s, _) => s,
+        }
+    }
+
     /// 情報パネルに出す作戦の名前。
     pub fn label(self) -> &'static str {
         match self {

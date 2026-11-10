@@ -89,6 +89,11 @@ pub struct Stats {
     pub max_ren: u32,
     /// ソフトドロップが必要だった手の数
     pub soft_drop_moves: u32,
+    /// 中あけの行数(REN の見込み)の最大(積み込み量)
+    pub peak_well_rows: u32,
+    /// 中あけが4行以上ある状態で最初に消した手の番号と、その時の行数(0 なら撃っていない)
+    pub first_fire_piece: u32,
+    pub first_fire_rows: u32,
     /// TSD のうち、予告があった時の数 / 予告が無く盤面が8以下だった時の数(ため込みの確認用)
     pub tsd_with_incoming: u32,
     pub tsd_low_quiet: u32,
@@ -104,6 +109,14 @@ pub struct Stats {
     pub b2b_breaks_single: u32,
     /// 壁の上を通れず、別の場所に落ちた手の数(`Player::block_margin`。2026-11-07)
     pub blocked: u32,
+    /// 序盤に選んだテンプレの名前(テンプレを選ばなかった・外の bot なら None。2026-11-08)
+    pub template: Option<String>,
+    /// 最初の4回の消去(Tスピンの種類, 消した行数, パフェか)
+    pub first_clears: Vec<(Spin, u32, bool)>,
+    /// そのそれぞれを消した手の番号(1から)
+    pub first_clear_at: Vec<u32>,
+    /// 手ごとに、置く前にテンプレが続いていたか(添字はそれまでに置いた手の数)
+    pub template_alive: Vec<bool>,
 }
 
 /// 1手置いた結果。
@@ -274,6 +287,7 @@ impl Player {
         let revealed = self.refill(sequence);
 
         let height_before = self.state.board.max_height();
+        let rows_before = tetrisai_engine::shape::ren_rows(&self.state.board);
         let incoming_before = self.incoming_lines();
         let had_b2b = self.state.back_to_back;
         let result = self.state.apply(&mv.placement, rules);
@@ -284,6 +298,11 @@ impl Player {
             s.b2b_breaks_single += (result.lines == 1) as u32;
         }
         s.pieces += 1;
+        s.peak_well_rows = s.peak_well_rows.max(rows_before);
+        if result.lines > 0 && rows_before >= 4 && s.first_fire_piece == 0 {
+            s.first_fire_piece = s.pieces;
+            s.first_fire_rows = rows_before;
+        }
         s.attack += result.attack;
         s.lines += result.lines;
         s.max_ren = s.max_ren.max(result.ren);
@@ -292,6 +311,10 @@ impl Player {
         s.soft_drop_moves += (mv.soft_drop_sections > 0) as u32;
         s.soft_drop_non_spin += (mv.soft_drop_sections > 0 && result.spin != Spin::Full) as u32;
         s.clear_moves += (result.lines > 0) as u32;
+        if result.lines > 0 && s.first_clears.len() < 8 {
+            s.first_clears.push((result.spin, result.lines, result.perfect_clear));
+            s.first_clear_at.push(s.pieces);
+        }
         match (result.spin, result.lines) {
             (Spin::None, 4) => s.tetrises += 1,
             (Spin::Full, 1) => s.tspin_singles += 1,
@@ -305,12 +328,15 @@ impl Player {
             _ => {}
         }
 
-        // 【2026-11-07・実機 debug_log_20261107_150112(約2,000手)の中央値に当てはめた】ハードドロップの手 370ms、
-        // 消すと演出で +650ms、ソフトドロップは接地の待ちなどで +300ms と1段 25ms
+        // 【2026-11-08・実機 debug_log_20261108_222319(フレームに合わせたキー入力)の中央値に当てはめた】キー1回 33ms
+        // (移動・回転 + ハードドロップ)と、それ以外(出現待ち・思考)130ms。ハードドロップだけの手は約4キーで 268ms。
+        // 消すと演出で +600ms。ソフトドロップはフレーム数で離す(落ち始め4 + 1段2 + 余裕4 フレーム)ので +100ms と1段 33ms
+        // (以前は ハードドロップの手 370ms・消去 +650ms・ソフトドロップ +300ms と1段 25ms: debug_log_20261107_150112)
         let drop_rows = (rules.spawn().y - mv.placement.location.y).max(0) as u32;
-        let move_ms = 370
-            + if result.lines > 0 { 650 } else { 0 }
-            + if mv.soft_drop_sections > 0 { 300 + 25 * drop_rows } else { 0 };
+        let move_ms = 130
+            + 33 * (mv.inputs as u32 + 1)
+            + if result.lines > 0 { 600 } else { 0 }
+            + if mv.soft_drop_sections > 0 { 100 + 33 * drop_rows } else { 0 };
         let mut outcome = Outcome { used_hold, revealed, blocked, move_ms, ..Default::default() };
         if result.lines > 0 {
             let mut attack = result.attack;
@@ -329,6 +355,10 @@ impl Player {
             self.gauge += attack;
             if !rules.garbage.send_after_ren_ends {
                 outcome.send = std::mem::take(&mut self.gauge);
+            }
+            // ぷよテト2 は REN の途中でも、相殺しきれなかった予告がせり上がる(2026-11-08・ユーザー)
+            if rules.garbage.rise_on_clear {
+                outcome.garbage_rose = self.rise(rules)?;
             }
         } else {
             // REN が途切れたのでゲージを放ち、届いている予告をせり上げる
@@ -360,6 +390,16 @@ impl Player {
                 for _ in 0..n {
                     let hole = self.hole_rng.gen_range(0..WIDTH);
                     overflow |= self.state.board.add_garbage(1, hole);
+                }
+                overflow
+            } else if rules.garbage.hole_keep_chance < 1.0 {
+                // 行ごとに、一定の確率で穴の列を選び直す(実機の盤面に合わせる。2026-11-09)
+                let mut overflow = false;
+                for _ in 0..n {
+                    overflow |= self.state.board.add_garbage(1, front.hole);
+                    if self.hole_rng.gen::<f32>() >= rules.garbage.hole_keep_chance {
+                        front.hole = self.hole_rng.gen_range(0..WIDTH);
+                    }
                 }
                 overflow
             } else {
@@ -426,6 +466,32 @@ mod tests {
         assert_eq!(p.bag_state(&mut seq).len(), 7, "袋の切れ目ではまるごと残っている");
     }
 
+    /// 盤面の下から `n` 行のおじゃまの穴の列
+    fn holes(board: &Board, n: usize) -> Vec<usize> {
+        (0..n).map(|y| (0..WIDTH).find(|&x| board.cols[x] >> y & 1 == 0).unwrap()).collect()
+    }
+
+    #[test]
+    fn おじゃまの穴の列は行ごとに半分ほどの確率で変わる() {
+        // 2026-11-09: 実機の盤面では、同じ穴の列が続く行数が1行ごとに約半分になる
+        let (mut p, _) = player(Board::new(), &[Piece::O]);
+        p.receive(40, &rules());
+        p.incoming.front_mut().unwrap().delay = 0;
+        p.rise(&rules()).unwrap();
+        let h = holes(&p.state.board, 40);
+        let changes = h.windows(2).filter(|w| w[0] != w[1]).count();
+        assert!((8..=30).contains(&changes), "穴の列が変わった回数 {changes}: {h:?}");
+        // 確率 1 なら攻撃の中は同じ列
+        let mut same = rules();
+        same.garbage.hole_keep_chance = 1.0;
+        let (mut q, _) = player(Board::new(), &[Piece::O]);
+        q.receive(10, &same);
+        q.incoming.front_mut().unwrap().delay = 0;
+        q.rise(&same).unwrap();
+        let h = holes(&q.state.board, 10);
+        assert!(h.windows(2).all(|w| w[0] == w[1]), "{h:?}");
+    }
+
     #[test]
     fn 届かない手は反則負け() {
         let (mut p, mut seq) = player(Board::new(), &[Piece::T]);
@@ -469,6 +535,20 @@ mod tests {
         assert!(r.garbage_rose);
         assert_eq!(p.stats.received, 2);
         assert_eq!(p.state.board.max_height(), 4, "おじゃま2行 + O の2段");
+    }
+
+    #[test]
+    fn renの途中でも相殺しきれなかった予告はせり上がる() {
+        // 2段の右端が空いた盤面: I を縦に入れて2行消す(ダブル = 攻撃1。上に2マス残るのでパフェにはならない)
+        let board = Board::from_rows(&["#########.", "#########."]);
+        let rules = rules();
+        assert!(rules.garbage.rise_on_clear);
+        let (mut p, mut seq) = player(board, &[Piece::I]);
+        p.receive(4, &rules);
+        p.incoming[0].delay = 0;
+        let r = p.place(&at(Piece::I, Rotation::East, 9, 2), &rules, &mut seq).unwrap();
+        assert!(r.garbage_rose, "消した手でも、相殺の残り3行がせり上がる");
+        assert_eq!((p.stats.cancelled, p.stats.received), (1, 3));
     }
 
     #[test]

@@ -28,6 +28,8 @@ pub struct GameConfig {
     pub block_margin: u32,
     /// 手にかかる実機の時間を数え、遅れている側だけが置く(2026-11-07。ソフトドロップ・消去の演出が遅いことを再現する)
     pub timed: bool,
+    /// timed のとき、手の時間を何%にするか(A, B)。人の相手の遅さを再現する(2026-11-09)
+    pub time_pct: [u32; 2],
 }
 
 #[derive(Clone, Debug)]
@@ -44,6 +46,18 @@ pub struct GameResult {
 /// 提案がまだ無いときに聞き直す回数と間隔
 const SUGGEST_RETRIES: u32 = 20;
 const SUGGEST_RETRY_WAIT: Duration = Duration::from_millis(10);
+
+/// 調べもの用: 環境変数 ARENA_TRACE に対局の種を入れるとその局だけ、`all` なら全局の1手ずつを標準エラーに出す
+fn traced(seed: u64) -> bool {
+    static SEED: std::sync::OnceLock<Option<Option<u64>>> = std::sync::OnceLock::new();
+    match SEED.get_or_init(|| {
+        std::env::var("ARENA_TRACE").ok().map(|s| if s == "all" { None } else { s.parse().ok() })
+    }) {
+        Some(None) => true,
+        Some(Some(s)) => *s == seed,
+        None => false,
+    }
+}
 
 pub fn play_game(bots: [&mut dyn Agent; 2], seed: u64, config: &GameConfig) -> io::Result<GameResult> {
     let rules = &config.rules;
@@ -108,9 +122,48 @@ pub fn play_game(bots: [&mut dyn Agent; 2], seed: u64, config: &GameConfig) -> i
                 players[i].loss = Some(loss);
                 continue;
             };
+            let alive = bots[i].template_name();
+            if players[i].stats.template.is_none() {
+                players[i].stats.template = alive.clone();
+                if let (true, Some(name)) = (traced(seed), &alive) {
+                    eprintln!("#{seed} {} テンプレ {name}", ["A", "B"][i]);
+                }
+            }
+            players[i].stats.template_alive.push(alive.is_some());
+            let before = (players[i].state.board.max_height(), players[i].incoming_lines(), players[i].stats.received);
             if let Ok(outcome) = players[i].place(&placement, rules, &mut sequence) {
+                // 調べもの用: 環境変数 ARENA_TRACE に対局の種を入れると、その局の1手ずつを標準エラーに出す(2026-11-09)
+                if traced(seed) {
+                    let p = &players[i];
+                    eprintln!(
+                        "#{seed} {} 手{:>3} 時刻{:>6} 高さ{:>2}→{:>2} 予告{:>2}→{:>2} せり上がり+{:<2} REN{:>2} ゲージ{:>2} 送る{:>2} 中あけ{:>2} 攻撃計{:>3} パフェ{} 出現{}",
+                        ["A", "B"][i],
+                        p.stats.pieces,
+                        clock[i],
+                        before.0,
+                        p.state.board.max_height(),
+                        before.1,
+                        p.incoming_lines(),
+                        p.stats.received - before.2,
+                        p.state.consecutive_clears,
+                        p.gauge,
+                        outcome.send,
+                        tetrisai_engine::shape::ren_rows(&p.state.board),
+                        p.stats.attack,
+                        p.stats.perfect_clears,
+                        tetrisai_engine::shape::spawn_height(&p.state.board),
+                    );
+                }
                 sends[i] = outcome.send;
-                clock[i] += outcome.move_ms;
+                // 【調べもの用・2026-11-10】環境変数 ARENA_IRS=A|B|AB: 出現待ちの間に最初の回転を押しておく(先行入力)とみなし、
+                // 回転して置く手は1キー(33ms)短くする
+                let irs = std::env::var("ARENA_IRS").is_ok_and(|v| v.contains(["A", "B"][i]));
+                let ms = if irs && placement.location.rotation != tetrisai_core::Rotation::North {
+                    outcome.move_ms.saturating_sub(33)
+                } else {
+                    outcome.move_ms
+                };
+                clock[i] += ms * config.time_pct[i] / 100;
                 needs_start[i] = outcome.garbage_rose || outcome.blocked;
                 let q = &players[i].queue;
                 let new_pieces = q.iter().skip(q.len() - outcome.revealed).copied().collect();
@@ -145,6 +198,9 @@ pub fn play_game(bots: [&mut dyn Agent; 2], seed: u64, config: &GameConfig) -> i
         }
         _ => None,
     };
+    if traced(seed) {
+        eprintln!("#{seed} 結果 {:?}", winner);
+    }
     let [p0, p1] = players;
     Ok(GameResult { seed, winner, losses, stats: [p0.stats, p1.stats], adjudicated })
 }

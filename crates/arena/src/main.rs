@@ -14,6 +14,7 @@
 //!   --a-weights <file> / --b-weights <file>  プロセスを使わず、この重み(TOML。`default` なら既定値)で
 //!                       このAIの探索を直接呼ぶ。思考時間ではなく幅(--width)を固定する
 //!   --width <数>        --a-weights / --b-weights の探索の幅(既定 128)
+//!   --a-width / --b-width <数>  片方だけ探索の幅を変える(既定は --width)
 //!   --a-no-incoming / --b-no-incoming  --a-weights / --b-weights の側に予告を教えない(比較実験用)
 //!   --a-no-opponent / --b-no-opponent  --a-weights / --b-weights の側に相手の情報を教えない(比較実験用)
 //!   --a-speculate / --b-speculate      --a-weights / --b-weights の側で、見えているミノの先を予測して読む
@@ -35,7 +36,7 @@ use tetrisai_arena::battle::{Loss, Stats};
 use tetrisai_arena::game::{play_game, GameConfig, GameResult};
 use tetrisai_arena::tbp::TbpBot;
 use tetrisai_core::Rules;
-use tetrisai_engine::{OpeningTracker, Weights};
+use tetrisai_engine::{OpeningMode, OpeningTracker, Weights};
 
 enum Engine {
     /// TBP の bot プロセス
@@ -49,6 +50,8 @@ enum Engine {
         use_opponent: bool,
         speculate: bool,
         opening: bool,
+        opening_mode: OpeningMode,
+        incoming_lag: usize,
     },
 }
 
@@ -57,12 +60,17 @@ impl Engine {
     fn create(&self, rules: &Rules, seed: u64) -> Box<dyn Agent + Send> {
         match self {
             Engine::Tbp { exe, args } => Box::new(TbpBot::spawn(exe, args).expect("bot を起動できない")),
-            Engine::InProcess { weights, label, width, use_incoming, use_opponent, speculate, opening } => {
+            Engine::InProcess { weights, label, width, use_incoming, use_opponent, speculate, opening, opening_mode, incoming_lag } => {
                 let mut agent = EngineAgent::new(weights.clone(), rules.clone(), *width, label);
+                agent.incoming_lag = *incoming_lag;
                 agent.use_incoming = *use_incoming;
                 agent.use_opponent = *use_opponent;
                 agent.speculate = *speculate;
-                agent.opening = opening.then(|| OpeningTracker::new(seed));
+                agent.opening = opening.then(|| {
+                    OpeningTracker::with_mode(seed, *opening_mode)
+                        .with_after_pc(weights.after_pc_seed, weights.after_pc_no_rival)
+                        .with_attacked_well(weights.td_attacked_well, weights.td_attacked_clears)
+                });
                 Box::new(agent)
             }
         }
@@ -94,6 +102,9 @@ fn main() {
             let speculate = args.iter().any(|a| *a == format!("--{side}-speculate"));
             let use_opponent = !args.iter().any(|a| *a == format!("--{side}-no-opponent"));
             let opening = !args.iter().any(|a| *a == format!("--{side}-no-opening"));
+            // 序盤の作戦(bot の --opening と同じ値。seed3 なら最初から C4W を目指す)
+            let opening_mode = get(&format!("--{side}-opening"))
+                .map_or(OpeningMode::default(), |s| OpeningMode::parse(&s).expect("--opening の値が分からない"));
             let mut label = stem;
             if !use_incoming {
                 label += "(予告なし)";
@@ -107,7 +118,14 @@ fn main() {
             if !opening {
                 label += "(序盤なし)";
             }
-            Engine::InProcess { weights: load_weights(&path), label, width, use_incoming, use_opponent, speculate, opening }
+            // 片方だけ幅を変える(実機の思考時間で届く幅の差が強さにどう響くかを見る。2026-11-08)
+            let width = num(&format!("--{side}-width"), width as u64) as usize;
+            // 予告に気づくまでの遅れ(自分の手の数。実機の C4W 側の反応の遅れを再現する。2026-11-10)
+            let incoming_lag = num(&format!("--{side}-incoming-lag"), 0) as usize;
+            if incoming_lag > 0 {
+                label += &format!("(予告の遅れ{incoming_lag})");
+            }
+            Engine::InProcess { weights: load_weights(&path), label, width, use_incoming, use_opponent, speculate, opening, opening_mode, incoming_lag }
         }
         None => {
             let exe = get(&format!("--{side}")).map(PathBuf::from).unwrap_or(default);
@@ -129,6 +147,7 @@ fn main() {
         adjudicate: args.iter().any(|a| a == "--adjudicate"),
         block_margin: num("--block-margin", 0) as u32,
         timed: args.iter().any(|a| a == "--timed"),
+        time_pct: [num("--a-time-pct", 100) as u32, num("--b-time-pct", 100) as u32],
     });
     let mut record = get("--record").map(|path| File::create(path).expect("記録ファイルを作れない"));
 
@@ -212,6 +231,151 @@ fn wilson(wins: usize, n: usize) -> (f64, f64) {
     (center - half, center + half)
 }
 
+/// A がテンプレを選んだ局で、最初の2回の消去が TST→TSD だったか(2026-11-08・ユーザー「テンプレは TST→TSD まで打ち切る」)。
+fn template_report(results: &[GameResult]) {
+    use tetrisai_core::Spin;
+    let games: Vec<&GameResult> = results.iter().filter(|r| r.stats[0].template.is_some()).collect();
+    if games.is_empty() {
+        return;
+    }
+    let n = games.len() as f64;
+    let kind = |r: &GameResult, i: usize| r.stats[0].first_clears.get(i).map(|c| (c.0, c.1));
+    let first_tst = games.iter().filter(|r| kind(r, 0) == Some((Spin::Full, 3))).count();
+    let tst_tsd = |r: &GameResult| kind(r, 0) == Some((Spin::Full, 3)) && kind(r, 1) == Some((Spin::Full, 2));
+    let both = games.iter().filter(|r| tst_tsd(r)).count();
+    let pc = games.iter().filter(|r| tst_tsd(r) && r.stats[0].first_clears.iter().skip(1).any(|c| c.2)).count();
+    let first_spin = games.iter().filter(|r| r.stats[0].first_clears.first().is_some_and(|c| c.0 == Spin::Full)).count();
+    let wins = games.iter().filter(|r| r.winner == Some(0)).count();
+    // 消した直後にテンプレが続いていたか
+    let alive_after = |r: &GameResult, i: usize| {
+        let s = &r.stats[0];
+        s.first_clear_at.get(i).and_then(|&m| s.template_alive.get(m as usize)).copied().unwrap_or(false)
+    };
+    let tst: Vec<&&GameResult> = games.iter().filter(|r| kind(r, 0) == Some((Spin::Full, 3))).collect();
+    let tsd: Vec<&&GameResult> = games.iter().filter(|r| tst_tsd(r)).collect();
+    let next_kind = |rs: &[&&GameResult], i: usize| {
+        let mut m = std::collections::BTreeMap::new();
+        for r in rs {
+            let k = match r.stats[0].first_clears.get(i) {
+                Some(c) => format!("{:?}{}{}", c.0, c.1, if c.2 { "PC" } else { "" }),
+                None => "なし".to_string(),
+            };
+            *m.entry(k).or_insert(0) += 1;
+        }
+        m
+    };
+    println!();
+    let rate = |f: &dyn Fn(&GameResult) -> bool| {
+        let g: Vec<&&GameResult> = games.iter().filter(|r| f(r)).collect();
+        let w = g.iter().filter(|r| r.winner == Some(0)).count();
+        format!("{} 局・勝率 {:.1}%", g.len(), 100.0 * w as f64 / g.len().max(1) as f64)
+    };
+    let has_pc = |r: &GameResult| tst_tsd(r) && r.stats[0].first_clears.iter().skip(1).any(|c| c.2);
+    println!(
+        "届いた所ごとの A の勝率: TST→TSD→パフェ {} / TST→TSD でパフェなし {} / TST だけ {} / TST なし {}",
+        rate(&has_pc),
+        rate(&|r| tst_tsd(r) && !has_pc(r)),
+        rate(&|r| kind(r, 0) == Some((Spin::Full, 3)) && !tst_tsd(r)),
+        rate(&|r| kind(r, 0) != Some((Spin::Full, 3)))
+    );
+    {
+        // パフェまで届いた局で、相手がどう耐えたか
+        let g: Vec<&&GameResult> = games.iter().filter(|r| has_pc(r)).collect();
+        let avg = |f: &dyn Fn(&GameResult) -> f64| g.iter().map(|r| f(r)).sum::<f64>() / g.len().max(1) as f64;
+        let pc_at = |r: &GameResult| {
+            let s = &r.stats[0];
+            s.first_clears.iter().zip(&s.first_clear_at).skip(1).find(|(c, _)| c.2).map_or(0, |(_, &m)| m)
+        };
+        let fired_before = g.iter().filter(|r| r.stats[1].first_fire_piece > 0 && r.stats[1].first_fire_piece <= pc_at(r)).count();
+        println!(
+            "パフェまで届いた局 {}: パフェは平均 {:.1} 手目 / A が送った {:.1} 行 / B が相殺した {:.1} 行・せり上がった {:.1} 行 / B が撃ち始めた {:.1} 手目(パフェより前に撃っていた {:.1}%) / B の勝ち {} 局",
+            g.len(),
+            avg(&|r| pc_at(r) as f64),
+            avg(&|r| r.stats[0].sent as f64),
+            avg(&|r| r.stats[1].cancelled as f64),
+            avg(&|r| r.stats[1].received as f64),
+            avg(&|r| r.stats[1].first_fire_piece as f64),
+            100.0 * fired_before as f64 / g.len().max(1) as f64,
+            g.iter().filter(|r| r.winner == Some(1)).count()
+        );
+    }
+    println!(
+        "TST の直後にテンプレが続いていた {:.1}%({} 局中)/ 次の消去 {:?}",
+        100.0 * tst.iter().filter(|r| alive_after(r, 0)).count() as f64 / tst.len().max(1) as f64,
+        tst.len(),
+        next_kind(&tst, 1)
+    );
+    println!(
+        "TSD の直後にテンプレが続いていた {:.1}%({} 局中)/ 次の消去 {:?}",
+        100.0 * tsd.iter().filter(|r| alive_after(r, 1)).count() as f64 / tsd.len().max(1) as f64,
+        tsd.len(),
+        next_kind(&tsd, 2)
+    );
+    println!(
+        "A がテンプレを選んだ局 {}: 最初の消去が Tスピン {:.1}% / TST {:.1}% / TST→TSD {:.1}% / TST→TSD→パフェ {:.1}% / A の勝率 {:.1}%",
+        games.len(),
+        100.0 * first_spin as f64 / n,
+        100.0 * first_tst as f64 / n,
+        100.0 * both as f64 / n,
+        100.0 * pc as f64 / n,
+        100.0 * wins as f64 / n
+    );
+}
+
+/// C4W の積み込み量・撃った順と勝敗の関係(両者とも撃った局だけ)。
+fn well_report(results: &[GameResult]) {
+    let both: Vec<&GameResult> =
+        results.iter().filter(|r| r.winner.is_some() && r.stats[0].first_fire_piece > 0 && r.stats[1].first_fire_piece > 0).collect();
+    let line = |name: &str, games: Vec<&&GameResult>| {
+        let wins = games.iter().filter(|r| r.winner == Some(0)).count();
+        println!("  {name}: {} 局 / A の勝率 {:.1}%", games.len(), 100.0 * wins as f64 / games.len().max(1) as f64);
+    };
+    println!();
+    println!("両者が C4W を撃った局 {}(決着した {} 局のうち)。撃った時の行数の差(A − B)ごと:", both.len(), results.iter().filter(|r| r.winner.is_some()).count());
+    let diff = |r: &GameResult| r.stats[0].first_fire_rows as i32 - r.stats[1].first_fire_rows as i32;
+    line("A が4行以上少ない", both.iter().filter(|r| diff(r) <= -4).collect());
+    line("A が1〜3行少ない", both.iter().filter(|r| (-3..=-1).contains(&diff(r))).collect());
+    line("同じ", both.iter().filter(|r| diff(r) == 0).collect());
+    line("A が1〜3行多い", both.iter().filter(|r| (1..=3).contains(&diff(r))).collect());
+    line("A が4行以上多い", both.iter().filter(|r| diff(r) >= 4).collect());
+    println!("撃った順ごと:");
+    line("A が先", both.iter().filter(|r| r.stats[0].first_fire_piece < r.stats[1].first_fire_piece).collect());
+    line("同時", both.iter().filter(|r| r.stats[0].first_fire_piece == r.stats[1].first_fire_piece).collect());
+    line("B が先", both.iter().filter(|r| r.stats[0].first_fire_piece > r.stats[1].first_fire_piece).collect());
+    // 【2026-11-08・ユーザー「互いに C4W を目指した場合、5REN 差があると後打ちが負けることが多い」】後に撃った側から見た行数の差ごと
+    println!("後打ちから見た行数の差(後打ち − 先打ち)ごとの後打ちの勝率(同時は除く):");
+    let order: Vec<(usize, i32, bool)> = both
+        .iter()
+        .filter(|r| r.stats[0].first_fire_piece != r.stats[1].first_fire_piece)
+        .map(|r| {
+            let later = if r.stats[0].first_fire_piece > r.stats[1].first_fire_piece { 0 } else { 1 };
+            let diff = r.stats[later].first_fire_rows as i32 - r.stats[1 - later].first_fire_rows as i32;
+            (later, diff, r.winner == Some(later))
+        })
+        .collect();
+    for (name, lo, hi) in [("5行以上少ない", i32::MIN, -5), ("1〜4行少ない", -4, -1), ("同じ", 0, 0), ("1〜4行多い", 1, 4), ("5行以上多い", 5, i32::MAX)] {
+        let g: Vec<_> = order.iter().filter(|o| o.1 >= lo && o.1 <= hi).collect();
+        let w = g.iter().filter(|o| o.2).count();
+        println!("  {name}: {} 局 / 後打ちの勝率 {:.1}%", g.len(), 100.0 * w as f64 / g.len().max(1) as f64);
+    }
+    let avg = |side: usize, f: &dyn Fn(&Stats) -> u32| both.iter().map(|r| f(&r.stats[side]) as f64).sum::<f64>() / both.len().max(1) as f64;
+    println!(
+        "撃った時の平均: A {:.1} 行({:.1} 手目) / B {:.1} 行({:.1} 手目)",
+        avg(0, &|s| s.first_fire_rows),
+        avg(0, &|s| s.first_fire_piece),
+        avg(1, &|s| s.first_fire_rows),
+        avg(1, &|s| s.first_fire_piece)
+    );
+    let only = |side: usize| results.iter().filter(move |r| r.winner.is_some() && r.stats[side].first_fire_piece > 0 && r.stats[1 - side].first_fire_piece == 0);
+    println!(
+        "片方だけ撃った局: A だけ {} 局(A の勝率 {:.1}%) / B だけ {} 局(A の勝率 {:.1}%)",
+        only(0).count(),
+        100.0 * only(0).filter(|r| r.winner == Some(0)).count() as f64 / only(0).count().max(1) as f64,
+        only(1).count(),
+        100.0 * only(1).filter(|r| r.winner == Some(0)).count() as f64 / only(1).count().max(1) as f64
+    );
+}
+
 fn summary(names: &[String; 2], results: &[GameResult]) {
     let n = results.len();
     if n == 0 {
@@ -272,6 +436,20 @@ fn summary(names: &[String; 2], results: &[GameResult]) {
         );
     }
 
+    println!();
+    for side in 0..2 {
+        let wins: Vec<&GameResult> = results.iter().filter(|r| r.winner == Some(side)).collect();
+        let big = wins.iter().filter(|r| r.stats[side].max_ren >= 8).count();
+        println!(
+            "{}の勝ち {} 局のうち、REN 8 以上を撃った局 {}({:.1}%)",
+            ["A", "B"][side],
+            wins.len(),
+            big,
+            100.0 * big as f64 / wins.len().max(1) as f64
+        );
+    }
+    well_report(results);
+    template_report(results);
     println!();
     println!("負け方:");
     for (side, name) in names.iter().enumerate() {

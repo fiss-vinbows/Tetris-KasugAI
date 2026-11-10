@@ -3,6 +3,7 @@
 pub mod aim;
 pub mod eval;
 pub mod opening;
+pub mod pco;
 pub mod search;
 pub mod shape;
 pub mod strategy;

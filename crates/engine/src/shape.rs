@@ -170,6 +170,33 @@ pub fn ren_rows(board: &Board) -> u32 {
     }
 }
 
+/// 中あけの下のおじゃまの穴の列を、同じ側のほかの列と中あけの行より高く積んだ段数。
+///
+/// 【2026-11-08・ユーザー「C4W を積み込んでいる時におじゃまがせり上がったら、穴がある列を高く積まないで。運が良ければ
+/// せり上がった部分から REN がつながる」】REN で中あけの行を消し切ると、それより上に積んだブロックが落ちてきて穴をふさぐ。
+/// 中あけの行より下で一番上のおじゃま(9マス埋まった行)の穴が左右の列(x=0〜2・7〜9)にある時だけ数える
+/// (中央4列の穴は中あけの上から届くので数えない)。中あけの行が無ければ 0。
+pub fn garbage_hole_overstack(board: &Board) -> u32 {
+    let height = board.max_height();
+    let Some(start) = (0..height).find(|&y| row(board, y) == SIDES) else { return 0 };
+    let top = (start..height).take_while(|&y| row(board, y) == SIDES).last().map_or(start, |y| y + 1);
+    let Some(hole_row) = (0..start).rev().map(|y| row(board, y)).find(|r| r.count_ones() == WIDTH as u32 - 1) else {
+        return 0;
+    };
+    let hole = (!hole_row & ROW_FULL).trailing_zeros() as usize;
+    let neighbors: [usize; 2] = match hole {
+        0 => [1, 2],
+        1 => [0, 2],
+        2 => [0, 1],
+        7 => [8, 9],
+        8 => [7, 9],
+        9 => [7, 8],
+        _ => return 0,
+    };
+    let base = neighbors.iter().map(|&x| board.column_height(x)).max().unwrap().max(top);
+    board.column_height(hole).saturating_sub(base)
+}
+
 /// 中あけの左右の高さの差(左3列の一番高いところと、右3列の一番高いところの差)。
 pub fn center_well_side_diff(board: &Board) -> u32 {
     let left = (0..3).map(|x| board.column_height(x)).max().unwrap();
@@ -181,6 +208,25 @@ pub fn center_well_side_diff(board: &Board) -> u32 {
 pub fn has_air_tsd(board: &Board) -> usize {
     let Some(lowest_well) = (0..board.max_height()).find(|&y| row(board, y) == SIDES) else { return 0 };
     tsd_slots(board).iter().filter(|&&(_, y)| (y as u32) > lowest_well + 1).count()
+}
+
+/// テトリスと TSD のどちらでも撃てる形の数(2026-11-09・ユーザー「テトリスとTSDのどちらでも対応できる形を良形として」)。
+///
+/// 同じ列 x に、下から4行以上のテトリスの井戸(x だけ空いた行が続く)と、その上に T の軸が x にある TSD の溝があり、
+/// x 列は井戸の底から上まで空いている(I を縦に落とせばテトリス、T を入れれば TSD)。どちらを先に撃っても、
+/// もう片方は残る。例(下から): `#####.####` ×6、`####...###`、`#####.####`、`####...###`、`......####`。
+pub fn tetris_tsd_flex(board: &Board) -> usize {
+    tsd_slots(board)
+        .into_iter()
+        .filter(|&(x, y)| {
+            let x = x as usize;
+            // x 列の一番上のブロックの上が井戸の底(x 列はそこから上まで空いている)
+            let bottom = board.column_height(x);
+            let well_row = ROW_FULL & !(1u16 << x);
+            // 井戸の4行が TSD の軸の行(y−1)以下にあり、どれも x だけ空いている
+            bottom + 4 <= y as u32 && (bottom..bottom + 4).all(|r| row(board, r) == well_row)
+        })
+        .count()
 }
 
 /// 中盤のパフェの見込みがある形か。
@@ -205,9 +251,37 @@ pub fn pc_possible(board: &Board) -> bool {
     (h.max(1)..=4).any(|rows| (rows * 10).checked_sub(cells).is_some_and(|rest| rest % 4 == 0))
 }
 
+/// 出現位置の列(中央4列: 3〜6列目)の一番高い高さ。ここが20段に届くとミノが出られず負ける(2026-11-09)。
+pub fn spawn_height(board: &Board) -> u32 {
+    (3..=6).map(|x| board.column_height(x)).max().unwrap_or(0)
+}
+
+/// 倒れるまでの近さ(20 に届くと負け): 出現位置の列の高さか、40段であふれるまでの近さの大きいほう。
+/// C4W の盤面は一番高い列が15段でも、中あけの底が低ければまだ遠い(2026-11-09)。
+pub fn spawn_danger(board: &Board) -> u32 {
+    spawn_height(board).max(board.max_height().saturating_sub(20))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn テトリスとtsdの両対応の形() {
+        // 2026-11-09 ユーザーの例(上から)
+        let mut rows = vec!["......####", "####...###", "#####.####", "####...###"];
+        rows.extend(["#####.####"; 6]);
+        let b = Board::from_rows(&rows);
+        assert_eq!(tetris_tsd_flex(&b), 2, "y6 と y8 の2つの溝");
+        // 井戸が3行しかなければテトリスにならない
+        let mut short = vec!["......####", "####...###", "#####.####", "####...###"];
+        short.extend(["#####.####"; 3]);
+        assert_eq!(tetris_tsd_flex(&Board::from_rows(&short)), 0);
+        // 溝の軸と井戸の列がずれていれば数えない
+        let mut apart = vec!["......####", "###...####", "####.#####"];
+        apart.extend(["#####.####"; 4]);
+        assert_eq!(tetris_tsd_flex(&Board::from_rows(&apart)), 0);
+    }
 
     #[test]
     fn tstの溝() {
@@ -308,6 +382,33 @@ mod tests {
     }
 
     #[test]
+    fn おじゃまの穴の列を高く積んだ段数() {
+        // 実機(debug_log_20261108_192000)の形: 右の7列目に穴のあるおじゃまの上に中あけ2行。7列目だけ3段高い
+        let board = Board::from_rows(&[
+            "...#..##..",
+            "...#####..",
+            "#####..###",
+            "###....###",
+            "###....###",
+            "#..#######",
+            "#######.##",
+            "#######.##",
+        ]);
+        assert_eq!(garbage_hole_overstack(&board), 2, "8・9列目(高さ6)より2段高い");
+        // 同じ側の列と同じ高さまでなら数えない
+        let flat = Board::from_rows(&["#####..###", "###....###", "###....###", "#######.##"]);
+        assert_eq!(garbage_hole_overstack(&flat), 0);
+        // 穴が中央4列にあれば数えない(中あけの上から届く)
+        let center = Board::from_rows(&["......#...", "###....###", "###....###", "#####.####"]);
+        assert_eq!(garbage_hole_overstack(&center), 0);
+        // 中あけの行が無ければ数えない
+        assert_eq!(garbage_hole_overstack(&Board::from_rows(&["#######...", "#######.##"])), 0);
+        // 左の穴: 0列目だけ高い
+        let left = Board::from_rows(&["#.........", "#.........", "###....###", ".#########"]);
+        assert_eq!(garbage_hole_overstack(&left), 2);
+    }
+
+    #[test]
     fn パフェの見込み() {
         // 埋まりマスが奇数(9)ならどの高さでも取れない
         assert!(!pc_possible(&Board::from_rows(&["#########."])), "9マスは奇数");
@@ -320,5 +421,14 @@ mod tests {
         // 5段以上は考えない
         assert!(!pc_possible(&Board::from_rows(&["##........"; 5])));
         assert!(!pc_possible(&Board::new()), "空の盤面はパフェ済み");
+    }
+
+    #[test]
+    fn 出現位置の列の高さ() {
+        let mut rows = vec!["###....###"; 15];
+        rows.push("###.######");
+        let board = Board::from_rows(&rows);
+        assert_eq!((spawn_height(&board), spawn_danger(&board), board.max_height()), (1, 1, 16));
+        assert_eq!(spawn_height(&Board::from_rows(&["#.........", "##....####"])), 1);
     }
 }

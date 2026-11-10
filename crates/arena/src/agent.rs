@@ -36,6 +36,10 @@ pub trait Agent {
         Ok(())
     }
     fn name(&self) -> String;
+    /// 今の序盤のテンプレの名前(記録用。2026-11-08)
+    fn template_name(&self) -> Option<String> {
+        None
+    }
 }
 
 impl Agent for TbpBot {
@@ -81,6 +85,10 @@ pub struct EngineAgent {
     pub forget_on_start: bool,
     /// 予告の時間差を伝えない(実機の TBA は delay 0 で送る)
     pub incoming_without_delay: bool,
+    /// 予告に気づくまでの遅れ(自分の手の数)。【2026-11-10・実機 debug_log_20261110_185033】実機の C4W 側は TST の6行を
+    /// 受けてから2〜3手後に REN を始めた(対戦シミュレーターでは次の手)。メモリで読んだ予告を bot に伝えるまでの遅れを再現する
+    pub incoming_lag: usize,
+    incoming_history: std::collections::VecDeque<Vec<IncomingGarbage>>,
     /// 作戦層(相手の情報を使うとき、相手の C4W を見て作戦を選ぶ)
     strategy: StrategyTracker,
     root: Option<Root>,
@@ -99,6 +107,8 @@ impl EngineAgent {
             opening: None,
             forget_on_start: false,
             incoming_without_delay: false,
+            incoming_lag: 0,
+            incoming_history: std::collections::VecDeque::new(),
             strategy: StrategyTracker::default(),
             root: None,
         }
@@ -115,11 +125,16 @@ impl EngineAgent {
     fn observe_opening(&mut self) {
         if let (Some(tracker), Some(root)) = (self.opening.as_mut(), self.root.as_mut()) {
             root.opening = tracker.observe(root, &self.rules);
+            root.opening_well = tracker.well_now();
         }
     }
 }
 
 impl Agent for EngineAgent {
+    fn template_name(&self) -> Option<String> {
+        self.opening.as_ref()?.template_name().map(String::from)
+    }
+
     fn start(&mut self, player: &Player, bag_state: &[Piece]) -> io::Result<()> {
         // 袋の切れ目(7個まるごと残っている)は「次は新しい袋」なので空にする
         let bag = if bag_state.len() == 7 { Vec::new() } else { bag_state.to_vec() };
@@ -142,7 +157,18 @@ impl Agent for EngineAgent {
     fn update_battle(&mut self, view: &BattleView) -> io::Result<()> {
         let Some(root) = self.root.as_mut() else { return Ok(()) };
         if self.use_incoming {
-            root.incoming = view.incoming.iter().map(|g| IncomingGarbage { lines: g.lines, delay: if self.incoming_without_delay { 0 } else { g.delay } }).collect();
+            let now: Vec<IncomingGarbage> =
+                view.incoming.iter().map(|g| IncomingGarbage { lines: g.lines, delay: if self.incoming_without_delay { 0 } else { g.delay } }).collect();
+            if self.incoming_lag == 0 {
+                root.incoming = now;
+            } else {
+                // 遅れの分だけ前の手の時点の予告を見せる
+                self.incoming_history.push_back(now);
+                while self.incoming_history.len() > self.incoming_lag + 1 {
+                    self.incoming_history.pop_front();
+                }
+                root.incoming = if self.incoming_history.len() > self.incoming_lag { self.incoming_history.front().cloned().unwrap_or_default() } else { Vec::new() };
+            }
         }
         if self.use_opponent {
             root.gauge = view.gauge;
@@ -153,7 +179,19 @@ impl Agent for EngineAgent {
                 gauge: o.gauge,
                 back_to_back: o.state.back_to_back,
             });
-            root.strategy = self.strategy.observe(&root.state.board, Some(&o.state.board));
+            root.strategy = self.strategy.observe(&root.state.board, Some(&o.state.board)).forced(self.weights.c4w_response);
+            // 【2026-11-10】速攻の相手(テンプレの途中で攻撃された)には、TSD の後 C4W に移る
+            if self.opening.as_ref().is_some_and(|t| t.force_rival()) && root.strategy == tetrisai_engine::Strategy::Normal {
+                root.strategy = tetrisai_engine::Strategy::C4WRival;
+            }
+            if self.opening.as_ref().is_some_and(|t| t.suppress_rival()) && root.strategy != tetrisai_engine::Strategy::Normal {
+                root.strategy = tetrisai_engine::Strategy::Normal;
+            }
+            if let Some(tracker) = self.opening.as_mut() {
+                if tracker.pivot_if_opponent_c4w(&o.state.board, self.weights.pivot_opening_rows) {
+                    root.opening = tetrisai_engine::Opening::None;
+                }
+            }
         }
         Ok(())
     }

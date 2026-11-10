@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use crate::opening::Opening;
 use crate::strategy::Strategy;
 use crate::eval::{
-    battle_value, evaluate, opponent_threat, reward, ren_cut_value, tsd_fire_value, BattleContext, EvalContext, Garbage, Weights,
+    battle_value, evaluate, opponent_threat, ren_potential, reward, rival_fire_value, ren_cut_value, tsd_fire_value, BattleContext, EvalContext, Garbage, Weights,
 };
 use tetrisai_core::{generate_into, Board, ClearResult, Move, Piece, Placement, PlayerState, Rules, Spawn};
 
@@ -68,6 +68,8 @@ pub struct Root {
     pub opening: Opening,
     /// 作戦層の作戦(相手の情報があるとき、bot が `StrategyTracker` で選ぶ)
     pub strategy: Strategy,
+    /// 序盤の作戦の間でも中あけ(C4W)の評価を使う(テンプレの途中で攻撃された時。`OpeningTracker::well_now`。2026-11-10)
+    pub opening_well: bool,
 }
 
 impl Root {
@@ -153,7 +155,7 @@ pub struct SearchResult {
 const LOCK_OUT_Y: i8 = 20;
 
 /// 同じ局面をまとめるための鍵(盤面・HOLD・次のミノの位置・B2B・REN・予告の片付いた量・せり上がった量・届く攻撃)。
-type NodeKey = (Board, Option<Piece>, usize, bool, u32, u32, u32, u32, bool);
+type NodeKey = (Board, Option<Piece>, usize, bool, u32, u32, u32, u32, u32, u8);
 
 struct Node {
     state: PlayerState,
@@ -174,8 +176,13 @@ struct Node {
     risen: u32,
     /// 相手に届く攻撃(相殺に使った分を除く)の合計。
     outgoing: u32,
-    /// 序盤のテンプレの図どおりに置き続けているか(外れるかラインを消すと false)。
-    on_template: bool,
+    /// 今の REN でためている、まとめて届く攻撃(相殺に使った分を除く。ラインを消さない手で 0 に戻る。2026-11-09)
+    burst: u32,
+    /// この局面までに1回にまとめて届く攻撃の最大
+    chunk: u32,
+    /// 序盤のテンプレの図どおりに置き続けているか。0 なら外れた。1 以上なら 1 + これまでに撃った回数(テンプレを選んでからの合計)。
+    /// 【2026-11-08・ユーザー】撃った回数が `TEMPLATE_CLEARS` に届くまで(TST→TSD)続ける。
+    on_template: u8,
 }
 
 /// 1手置いた後の予告の状態 (consumed, risen)。`depth` はこの手が何手目か(0 から)。
@@ -187,12 +194,12 @@ fn garbage_after(
     result: &ClearResult,
     rules: &Rules,
 ) -> (u32, u32) {
-    if result.lines > 0 {
-        if rules.garbage.cancel_incoming_first {
-            consumed += result.attack.min(total - consumed);
-        }
-    } else {
-        // 待ち時間の過ぎた予告を古い順にせり上げる(1回の固定で max_rise_per_piece 行まで。0 は上限なし)
+    if result.lines > 0 && rules.garbage.cancel_incoming_first {
+        consumed += result.attack.min(total - consumed);
+    }
+    if result.lines == 0 || rules.garbage.rise_on_clear {
+        // 待ち時間の過ぎた予告を古い順にせり上げる(1回の固定で max_rise_per_piece 行まで。0 は上限なし)。
+        // ぷよテト2 はラインを消した手(REN の途中)でも、相殺しきれなかった分がせり上がる(rise_on_clear)
         let mut budget = match rules.garbage.max_rise_per_piece {
             0 => u32::MAX,
             n => n,
@@ -238,6 +245,20 @@ pub fn search(
     if root.queue.is_empty() {
         return None;
     }
+    // 【2026-11-09】早撃ちの間は、C4W 相手専用の重み一式(`Weights::rush`)があればそれで考える
+    let weights = match (&root.strategy, &weights.rush) {
+        (crate::strategy::Strategy::Rush, Some(rush)) => rush.as_ref(),
+        _ => weights,
+    };
+    // 【2026-11-09】開幕パフェの間は、pco.rs が選んだ位置に置く(入らなければふつうに考える)
+    if let Opening::Pco(loc) = &root.opening {
+        if let Some(mv) = crate::pco::to_move(&root.state.board, &crate::pco::Action { loc: *loc }, rules) {
+            return Some(SearchResult { candidates: vec![Candidate { mv, score: 0.0 }], plan: vec![mv], nodes: 0, depth: 1 });
+        }
+        let mut free = root.clone();
+        free.opening = Opening::None;
+        return search(&free, options, weights, rules, cancelled);
+    }
     let depth_limit = if root.hold.is_some() { root.queue.len() } else { root.queue.len().saturating_sub(1).max(1) };
     let depth_limit = depth_limit.min(options.max_depth).max(1);
     let spawn = rules.spawn();
@@ -254,14 +275,26 @@ pub fn search(
         consumed: 0,
         risen: 0,
         outgoing: 0,
-        on_template: matches!(root.opening, Opening::Template(_)),
+        burst: if root.state.consecutive_clears > 0 { root.gauge } else { 0 },
+        chunk: 0,
+        on_template: if let Opening::Template(t) = &root.opening { 1 + t.clears as u8 } else { 0 },
     }]];
     let incoming_total: u32 = root.incoming.iter().map(|g| g.lines).sum();
     let battle = BattleContext {
-        opponent_danger: root.opponent.map(|o| o.board.max_height() + o.incoming),
+        opponent_danger: root.opponent.map(|o| {
+            if weights.c4w_spawn_danger && root.strategy != crate::strategy::Strategy::Normal {
+                crate::shape::spawn_danger(&o.board) + o.incoming
+            } else {
+                o.board.max_height() + o.incoming
+            }
+        }),
+        opponent_spawn_danger: root.opponent.map(|o| crate::shape::spawn_danger(&o.board) + o.incoming),
         opponent_threat: root.opponent.map_or(0, |o| opponent_threat(rules, &o.board, o.gauge, o.back_to_back)),
+        opponent_ren: root.opponent.map_or(0, |o| ren_potential(rules, &o.board, 0) + o.gauge),
+        opponent_rows: root.opponent.map_or(0, |o| crate::shape::ren_rows(&o.board)),
         gauge: root.gauge,
         strategy: root.strategy,
+        opponent_cancel: root.opponent.map_or(0, |o| crate::eval::opponent_cancel(rules, o.gauge)),
     };
     let mut nodes = 0u64;
     let mut moves = Vec::with_capacity(64);
@@ -295,17 +328,36 @@ pub fn search(
                 _ => {}
             }
 
+            // 【2026-11-08・ユーザー「はちみつ砲の2巡目を早々にあきらめた。序盤なので組み切って」】テンプレの間は、
+            // 実際に置く手(根の手)に図どおりの手が1つでもあれば、図に無い手を選ばない(加点だけだと、評価の高い別の手で
+            // 図から外れた: debug_log_20261108_192000 の1P 局4・2P 局6)
+            // 縛るのは最初の消去(TST)まで。消えた後も縛ると TST→TSD が減った(対戦シミュレーター: 43% → 39%)
+            let template_only = match (&root.opening, depth, parent.on_template) {
+                (Opening::Template(t), 0, 1) if !weights.template_bonus_only => options_here[..count].iter().any(|&(piece, _, _)| {
+                    generate_safe(&parent.state.board, piece, spawn, weights.spawn_margin, &mut moves);
+                    moves.iter().any(|mv| t.accepts(&parent.state.board, &mv.placement.location))
+                }),
+                _ => false,
+            };
             for &(piece, hold, next) in &options_here[..count] {
                 generate_safe(&parent.state.board, piece, spawn, weights.spawn_margin, &mut moves);
                 for mv in &moves {
                     if mv.placement.location.cells().iter().all(|&(_, y)| y >= LOCK_OUT_Y) {
                         continue;
                     }
+                    let off_template = template_only
+                        && !matches!(&root.opening, Opening::Template(t) if t.accepts(&parent.state.board, &mv.placement.location));
                     let mut state = parent.state;
                     let result = state.apply(&mv.placement, rules);
+                    // 図に無くても、Tスピンダブル以上とパフェは撃てる(消えた後の図と撃ち方がずれると、撃つ手が図に無い手に
+                    // なる。縛るだけだと TST→TSD が 43% → 29%、TST→TSD→パフェが 21% → 15% に減った: 対戦シミュレーター)
+                    if off_template && !(result.perfect_clear || (result.spin == tetrisai_core::Spin::Full && result.lines >= 2)) {
+                        continue;
+                    }
                     let mut r = parent.reward
                         + reward(weights, rules, mv, &result)
                         + ren_cut_value(weights, parent.state.consecutive_clears, result.lines, &state.board)
+                        + rival_fire_value(weights, root.strategy, parent.state.consecutive_clears, result.lines, &parent.state.board, battle.opponent_rows)
                         + if root.opening.is_active() {
                             0.0
                         } else {
@@ -316,12 +368,19 @@ pub fn search(
                                 incoming_total - parent.consumed,
                             )
                         };
-                    // 序盤のテンプレ: 図どおりの手に加点する。ラインを消したら(撃ったら)テンプレは終わり
-                    let mut on_template = false;
-                    if let (true, Opening::Template(t)) = (parent.on_template, &root.opening) {
+                    // 序盤のテンプレ: 図どおりの手に加点する。消した後は、消した回数が TEMPLATE_CLEARS に届くまで続ける
+                    // (読みの中では消えた行を図から取り除かないので、消した後の加点は次に局面を受け取ってから)
+                    let mut on_template = 0;
+                    if let (1.., Opening::Template(t)) = (parent.on_template, &root.opening) {
                         if t.accepts(&parent.state.board, &mv.placement.location) {
                             r += weights.template_piece;
-                            on_template = result.lines == 0;
+                            on_template = if result.lines == 0 {
+                                parent.on_template
+                            } else if (parent.on_template as u32) < crate::opening::TEMPLATE_CLEARS {
+                                parent.on_template + 1
+                            } else {
+                                0
+                            };
                         }
                     }
                     if matches!(root.opening, Opening::Tsd) && result.spin == tetrisai_core::Spin::Full && result.lines == 2 {
@@ -340,19 +399,23 @@ pub fn search(
                     );
                     let pending = incoming_total - consumed;
                     let garbage = Garbage { extra_height: risen + pending, pending };
-                    let cancelled_now = if result.lines > 0 { consumed - parent.consumed } else { 0 };
+                    // 相殺した行数 = 消費した予告のうち、せり上がらなかった分(消した手でもせり上がる規則があるので分ける。2026-11-08)
+                        let cancelled_now = (consumed - parent.consumed) - (risen - parent.risen);
                     let outgoing = parent.outgoing + result.attack - cancelled_now;
+                    let burst = if result.lines > 0 { parent.burst + result.attack - cancelled_now } else { 0 };
+                    let chunk = parent.chunk.max(parent.burst).max(burst);
                     let our_top = state.board.max_height() + risen + pending;
                     let ctx = EvalContext {
                         t_available,
                         garbage,
                         consecutive_clears: state.consecutive_clears,
-                        opening: root.opening.is_active(),
+                        opponent_rows: battle.opponent_rows,
+                        opening: root.opening.is_active() && !root.opening_well,
                         strategy: root.strategy,
                     };
                     let score = r
                         + evaluate(weights, rules, &state.board, state.back_to_back, &ctx)
-                        + battle_value(weights, &battle, outgoing, our_top);
+                        + battle_value(weights, &battle, outgoing, chunk, our_top);
                     nodes += 1;
 
                     let first = if depth == 0 { u32::MAX } else { parent.first };
@@ -368,6 +431,8 @@ pub fn search(
                         consumed,
                         risen,
                         outgoing,
+                        burst,
+                        chunk,
                         on_template,
                     };
                     let key = (
@@ -379,6 +444,8 @@ pub fn search(
                         consumed,
                         risen,
                         outgoing,
+                        // まとめて届く攻撃は早撃ちの評価でだけ使う(ほかの作戦では今までどおり同じ局面とみなして1つにまとめる)
+                        if root.strategy == crate::strategy::Strategy::Rush { chunk } else { 0 },
                         on_template,
                     );
                     match seen.get(&key) {
@@ -447,19 +514,24 @@ pub fn search(
                         );
                         let pending = incoming_total - consumed;
                         let garbage = Garbage { extra_height: risen + pending, pending };
-                        let cancelled_now = if result.lines > 0 { consumed - node.consumed } else { 0 };
+                        // 相殺した行数 = 消費した予告のうち、せり上がらなかった分(消した手でもせり上がる規則があるので分ける。2026-11-08)
+                        let cancelled_now = (consumed - node.consumed) - (risen - node.risen);
                         let outgoing = node.outgoing + result.attack - cancelled_now;
+                        let burst = if result.lines > 0 { node.burst + result.attack - cancelled_now } else { 0 };
+                        let chunk = node.chunk.max(node.burst).max(burst);
                         let our_top = state.board.max_height() + risen + pending;
                         let ctx = EvalContext {
                             t_available: 1,
                             garbage,
                             consecutive_clears: state.consecutive_clears,
-                            opening: root.opening.is_active(),
+                        opponent_rows: battle.opponent_rows,
+                            opening: root.opening.is_active() && !root.opening_well,
                             strategy: root.strategy,
                         };
                         let s = node.reward
                             + reward(weights, rules, mv, &result)
                             + ren_cut_value(weights, node.state.consecutive_clears, result.lines, &state.board)
+                            + rival_fire_value(weights, root.strategy, node.state.consecutive_clears, result.lines, &node.state.board, battle.opponent_rows)
                             + if root.opening.is_active() {
                                 0.0
                             } else {
@@ -471,7 +543,7 @@ pub fn search(
                                 )
                             }
                             + evaluate(weights, rules, &state.board, state.back_to_back, &ctx)
-                            + battle_value(weights, &battle, outgoing, our_top);
+                            + battle_value(weights, &battle, outgoing, chunk, our_top);
                         nodes += 1;
                         best = best.max(s);
                     }
@@ -532,6 +604,33 @@ mod tests {
     }
 
     #[test]
+    fn テンプレの間は図どおりの手があれば必ず選ぶ() {
+        // 【2026-11-08・ユーザー「はちみつ砲の2巡目を早々にあきらめた。序盤なので組み切って」】
+        // テンプレの加点を 0 にしても(評価がほかの手を好んでも)、根の手は図どおりの手から選ぶ
+        let rules = Rules::ppt2();
+        let honey = crate::opening::priority_templates()[0].clone();
+        let queue = [Piece::I, Piece::O, Piece::L, Piece::S, Piece::Z, Piece::T];
+        assert!(honey.buildable_hard_drop(&queue, None, &rules));
+        let mut weights = Weights::default();
+        weights.template_piece = 0.0;
+        let root = Root {
+            state: PlayerState::new(Board::new()),
+            queue: queue.to_vec(),
+            opening: Opening::Template(honey.clone()),
+            ..Default::default()
+        };
+        let options = SearchOptions { width: 64, max_depth: 6, speculate: false };
+        let r = search(&root, &options, &weights, &rules, &|| false).expect("手がある");
+        let first = r.candidates[0].mv.placement.location;
+        assert!(honey.accepts(&Board::new(), &first), "{first:?}");
+        assert!(r.candidates.iter().all(|c| honey.accepts(&Board::new(), &c.mv.placement.location)));
+        // テンプレでなければ縛らない
+        let free = Root { opening: Opening::None, ..root };
+        let r = search(&free, &options, &weights, &rules, &|| false).expect("手がある");
+        assert!(r.candidates.iter().any(|c| !honey.accepts(&Board::new(), &c.mv.placement.location)));
+    }
+
+    #[test]
     fn tsdの溝があればtsdを撃つ() {
         let board = Board::from_rows(&[
             "##........",
@@ -581,17 +680,28 @@ mod tests {
         let incoming = [IncomingGarbage { lines: 3, delay: 0 }, IncomingGarbage { lines: 2, delay: 2 }];
         let clear = ClearResult { lines: 2, attack: 4, ..Default::default() };
         let none = ClearResult::default();
-        // 攻撃4で古いほうから4行を相殺
+        // 攻撃4で古いほうから4行を相殺(残りの1行はまだ待ち時間の中)
         assert_eq!(garbage_after(&incoming, 5, (0, 0), 0, &clear, &rules), (4, 0));
+        // 攻撃の無い消去(REN の始め)でも、待ち時間の過ぎた予告はせり上がる(ぷよテト2)
+        let single = ClearResult { lines: 1, attack: 0, ..Default::default() };
+        assert!(rules.garbage.rise_on_clear);
+        assert_eq!(garbage_after(&incoming, 5, (0, 0), 0, &single, &rules), (3, 3));
+        let mut old = rules.clone();
+        old.garbage.rise_on_clear = false;
+        assert_eq!(garbage_after(&incoming, 5, (0, 0), 0, &single, &old), (0, 0));
         // 消さない手: 1手目(depth 0)では待ち時間0の3行だけせり上がる
         assert_eq!(garbage_after(&incoming, 5, (0, 0), 0, &none, &rules), (3, 3));
         // 3手目(depth 2)なら残りの2行もせり上がる
         assert_eq!(garbage_after(&incoming, 5, (3, 3), 2, &none, &rules), (5, 5));
-        // 1回の固定でせり上がるのは7行まで(ぷよテト2)
-        assert_eq!(rules.garbage.max_rise_per_piece, 7);
+        // ぷよテト2 は1回の固定で予告の全部がせり上がる(2026-11-08・実機ログで 10行・11行が1手でせり上がった)
+        assert_eq!(rules.garbage.max_rise_per_piece, 0);
         let big = [IncomingGarbage { lines: 10, delay: 0 }];
-        assert_eq!(garbage_after(&big, 10, (0, 0), 0, &none, &rules), (7, 7));
-        assert_eq!(garbage_after(&big, 10, (7, 7), 1, &none, &rules), (10, 10));
+        assert_eq!(garbage_after(&big, 10, (0, 0), 0, &none, &rules), (10, 10));
+        // 上限のある規則なら、その行数まで
+        let mut capped = rules.clone();
+        capped.garbage.max_rise_per_piece = 7;
+        assert_eq!(garbage_after(&big, 10, (0, 0), 0, &none, &capped), (7, 7));
+        assert_eq!(garbage_after(&big, 10, (7, 7), 1, &none, &capped), (10, 10));
     }
 
     #[test]

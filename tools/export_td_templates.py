@@ -7,8 +7,11 @@
 書き出すもの(crates/engine/data/td_templates.json。engine に埋め込む):
     [{"name": テンプレ名, "forms": [{"section": 節, "existing": [[x, y], ...],
                                      "items": [{"piece": "T", "cells": [[x, y], ...], "last": bool}, ...]}]}]
-座標は KasugAI の盤面と同じ(x は左から、y は下から 0)。行が消えた後に置くミノ(TBA の gap_rows)は、
-序盤が「テンプレを撃つまで」(最初にラインを消すまで)なので書き出さない。
+座標は KasugAI の盤面と同じ(x は左から、y は下から 0)。
+【2026-11-10・ユーザー「図を足す」】行が消えた後に置くミノ(TBA の gap_rows。消える前の座標で、間の行をまたいで分かれて
+描かれている)も書き出す。以前は序盤が「テンプレを撃つまで」だったので外していたが、テンプレを TST→TSD→パフェまで続ける
+ようになってからも外れたままで、TST・TSD の後に置く図が足りず、テンプレが途中で終わっていた。KasugAI は行が消えた後に
+図をずらす(opening.rs の Form::collapsed)ので、消えた後はつながった形になる。"gap_rows" は記録用(KasugAI は読まない)。
 
 使い方(TBA の venv の Python で実行する):
     ../Tetris/venv/Scripts/python.exe tools/export_td_templates.py
@@ -25,7 +28,7 @@ TBA = ROOT.parent / "Tetris"
 OUT = ROOT / "crates" / "engine" / "data" / "td_templates.json"
 sys.path.insert(0, str(TBA))
 
-from src.engine.openers import BOARD_ROWS, TD_EXTRA_TEMPLATES  # noqa: E402
+from src.engine.openers import BOARD_ROWS, OPENER_TEMPLATES, TD_EXTRA_TEMPLATES, _assist_template  # noqa: E402
 
 
 def to_xy(cells) -> list[list[int]]:
@@ -35,13 +38,15 @@ def to_xy(cells) -> list[list[int]]:
 
 def main() -> None:
     templates = []
-    for template in TD_EXTRA_TEMPLATES:
+    # 【2026-11-07・ユーザー】はちみつ砲と迷走砲を優先して狙う。迷走砲は Iミノが左側の図だけ(_assist_template が左右反転を除く)
+    priority = [_assist_template(t) for t in OPENER_TEMPLATES if t.name_ja in ("はちみつ砲", "迷走砲")]
+    for template in (*TD_EXTRA_TEMPLATES, *priority):
         forms = []
         for form in template.forms:
             items = [
                 {"piece": item.piece, "cells": to_xy(item.cells), "last": item.last}
+                | ({"gap_rows": sorted(BOARD_ROWS - 1 - r for r in item.gap_rows)} if item.gap_rows else {})
                 for item in form.items
-                if not item.gap_rows
             ]
             if items:
                 forms.append({"section": form.section, "existing": to_xy(form.existing), "items": items})

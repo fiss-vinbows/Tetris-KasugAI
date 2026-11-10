@@ -95,6 +95,12 @@ pub struct Weights {
     /// 中あけが残っている(`shape::ren_rows` の見積もりが2行以上)のに、続いていた REN を消さない手で切った
     /// (2026-11-07。少しだけ消して積み直すのを減らす)
     pub ren_cut: f32,
+    /// 自分の高さ + 相手の C4W の火力が天井を超えた1行あたり(2026-11-07。相手の貯めた REN を受け切れる高さに保つ)
+    pub ren_threat_overflow: f32,
+    /// 序盤の作戦の途中でも、相手の C4W の行数がこの値以上なら序盤を切り上げる(0 なら切り上げない)
+    pub pivot_opening_rows: u32,
+    /// 相手の C4W への答え方を固定する。0: 育ち具合で選ぶ、1: 必ず C4W で対抗、2: 必ず早撃ち
+    pub c4w_response: u32,
     /// 重ねた TSD の溝(ダブルダガーなど)の2つ目以降1つあたり。【2026-11-07・ユーザー】盤面が低い時は TSD のソフトドロップに
     /// 時間がかかるので、すぐ撃たずに溝をためて、相手の攻撃を受けてからカウンターする
     pub tsd_stock: f32,
@@ -114,12 +120,29 @@ pub struct Weights {
     pub tsd_slot_any: f32,
     /// 中盤のパフェの見込みがある形(埋まりマスが偶数・穴なし・4段以内でそろえられる)
     pub pc_chance: f32,
+    /// テトリスと TSD のどちらでも撃てる形(`shape::tetris_tsd_flex`、2つまで)1つあたり。
+    /// 【2026-11-09・ユーザー「テトリスとTSDのどちらでも対応できる形を良形として考えてほしい」】
+    pub tetris_tsd_flex: f32,
+    /// テンプレか開幕パフェでパフェまで撃った後、次のテンプレが組めなければ、最初に撃つまで TSD を狙う(C4W に向かわない)。
+    /// 【2026-11-09・ユーザー「TDパフェを取った後にC4Wに向かっているのがよくない。火力の種を早々に作ることの方が大事」】
+    pub after_pc_seed: bool,
+    /// パフェまで撃った後は、その局の終わりまで「C4W で対抗」を使わない(相手が C4W を目指していても、ふつうの作戦)
+    pub after_pc_no_rival: bool,
+    /// TDテンプレの途中で攻撃されたら(速攻の相手)、T を待ちながら C4W の形も作り、TSD まで撃ったらテンプレを終える
+    /// (`OpeningTracker::with_attacked_well`。2026-11-10・ユーザー)
+    pub td_attacked_well: bool,
+    /// テンプレで何回消すまでに攻撃されたら速攻とみなすか(1 = TST の後まで)
+    pub td_attacked_clears: u32,
     /// ソフトドロップで落とした段数1段あたり(低い盤面での Tスピンは落とす時間が長く効率が悪い)
     pub soft_drop_rows: f32,
     /// Tスピン(TSS・TSD・TST)以外の手のソフトドロップの区間1つあたり(`soft_drop_section` に足す)。
     /// 【2026-11-03・ユーザー(実機の全自動)】「Tスピン以外のソフトドロップを控えられませんか」。全自動では落とす時間が
     /// そのまま遅れになり、S・Z・O・I の差し込みや回さずに横へ滑り込ませる T でも使っていた(1局 約9手、全体の約5%)
     pub soft_drop_non_spin: f32,
+    /// 左右移動・回転のキー1回あたり(`Move::inputs`)。【2026-11-08・ユーザー「移動速度を早くする学習」】全自動ではキー1回が
+    /// 約33ms(フレームに合わせて送る)かかるので、同じくらいの形なら少ないキーで置ける手を選ばせる。自動調整で決める
+    #[serde(default)]
+    pub input_keys: f32,
 
     // ---- C-spin(暫定。既定値は0で効かない。試験用の重みは config/weights/experimental_cspin.toml) ----
     /// TST の溝(縦向きの T を入れると3行消える形)1つあたり(2つまで)
@@ -135,15 +158,52 @@ pub struct Weights {
     pub template_piece: f32,
     /// 開幕TSD の序盤で TSD を撃つ手の加点(2026-11-05)
     pub opening_tsd: f32,
+    /// true なら、テンプレの最初の消去までも図どおりの手に加点するだけにする(以前の動き。比べるため)。既定の false では、
+    /// 図どおりの手があれば図に無い手を選ばない(2026-11-08・ユーザー「はちみつ砲の2巡目を早々にあきらめた。組み切って」)
+    #[serde(default)]
+    pub template_bonus_only: bool,
     /// 盤面が低い時(10段以下)の TST の溝の追加の点(2026-11-05・ユーザー「盤面が低い時は TST を多用したい」)
     #[serde(default)]
     pub tst_slot_low: f32,
+    /// 中あけの下のおじゃまの穴の列(左右の列)を、同じ側のほかの列と中あけの行より高く積んだ1段あたり
+    /// (`shape::garbage_hole_overstack`)。【2026-11-08・ユーザー「C4W を積み込んでいる時におじゃまがせり上がったら、
+    /// 穴がある列を高く積まないで。運が良ければせり上がった部分から REN がつながる」】
+    #[serde(default)]
+    pub garbage_hole_overstack: f32,
 
     // ---- 作戦層(2026-11-03。strategy.rs。全自動で相手の情報があるときだけ効く。既定値は0) ----
     /// 「C4W で対抗」のとき、貯めた REN の火力1行あたりに足す点
     pub rival_ren: f32,
+    /// 「C4W で対抗」のとき、相手より少ない中あけの行数1行あたり(2026-11-07・ユーザー「積み込み量が不足して押し切られる」)
+    pub rival_deficit: f32,
+    /// 「C4W で対抗」のとき、相手より少ない行数のまま撃ち始めた手(盤面が `rival_fire_height` を超えていれば減点しない)
+    pub rival_early_fire: f32,
+    /// `rival_early_fire` を使う高さの上限
+    pub rival_fire_height: u32,
     /// 「早撃ち」のとき、相手に届く攻撃1行あたりに足す点(C4W は組まない)
     pub rush_attack: f32,
+
+    // ---- 早撃ちの詰め(2026-11-09・ユーザー「相手が開幕 C4W の時の対策を、C4W で対抗する以外の方法で」) ----
+    // C4W の相手は、一番高い列(15段ほど)ではなく、中あけの底が出現位置(20段)に届いた時に倒れる(出現位置がふさがる)。
+    // 実機でも C4W の盤面は29〜34段まで押し上げられて REN を続けていた(TBA の debug_log の「天井より上」)
+    /// 相手が C4W のとき、相手の危なさを出現位置の列(中央4列)の高さで見る(`shape::spawn_height`)。false なら一番高い列
+    pub c4w_spawn_danger: bool,
+    /// 「早撃ち」のとき、相手に届く攻撃1行あたり × 相手の危なさ(出現位置の列の高さ + 予告)/ 20
+    pub rush_pressure: f32,
+    /// 「早撃ち」のとき、1回にまとめて届く攻撃(相手の REN の1手分の相殺を引く)で相手の出現位置をふさげる手
+    /// (2026-11-09 に、まとめて届く量と相手の相殺を見るように直した。小分けに送ると相手の REN の攻撃に1手ずつ打ち消される)
+    pub rush_lethal: f32,
+    /// 「早撃ち」のとき、自分の盤面の高さ(予告を上乗せ)1段あたり
+    pub rush_height: f32,
+    /// 「早撃ち」のとき、自分の高さ + 相手の C4W の火力が20段を超えた1段あたり
+    pub rush_ren_overflow: f32,
+    /// 「早撃ち」のとき、相手の出現位置の余裕が8段以下なら、1回にまとめて届く攻撃(相殺を引く)が余裕を埋める割合(0〜1)
+    /// 【2026-11-09】C4W の相手を17〜19段まで押し上げても、あと数行が届かずに負けた局が約3割あった
+    #[serde(default)]
+    pub rush_finish: f32,
+    /// 早撃ちの間だけ使う重み一式(C4W 相手専用。設定ファイルの [rush] の表)。無ければこの重みのまま
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rush: Option<Box<Weights>>,
 }
 
 /// 盤面の評価に渡す、局面ごとの値。
@@ -155,6 +215,8 @@ pub struct EvalContext {
     pub garbage: Garbage,
     /// この局面の REN の状態(続けて消した回数。0 なら REN 中でない)
     pub consecutive_clears: u32,
+    /// 相手の中あけの行数(相手の情報が無ければ 0)
+    pub opponent_rows: u32,
     /// 序盤(テンプレか素の状態)か。序盤は中あけ REN を組まない(中あけの項目を使わない)
     pub opening: bool,
     /// 作戦層の作戦(strategy.rs)
@@ -166,12 +228,37 @@ pub struct EvalContext {
 pub struct BattleContext {
     /// 相手の危なさ(相手の盤面の高さ + 相手への予告の行数)。相手の情報が無ければ None
     pub opponent_danger: Option<u32>,
+    /// 相手の出現位置の列(中央4列)の高さ + 相手への予告の行数(`shape::spawn_height`。2026-11-09)
+    pub opponent_spawn_danger: Option<u32>,
     /// 相手が次に撃てる攻撃の見積もり(行数)
     pub opponent_threat: u32,
+    /// 相手が貯めた C4W を撃った時の火力の見積もり(行数)
+    pub opponent_ren: u32,
+    /// 相手の中あけの行数
+    pub opponent_rows: u32,
     /// 自分の攻撃ゲージ(REN 中にためている攻撃。次にラインを消さない手を置くと相手へ送られる)
     pub gauge: u32,
     /// 作戦層の作戦(strategy.rs)
     pub strategy: Strategy,
+    /// 相手が REN 中なら、相手の次の1手が打ち消す行数の見積もり(`opponent_cancel`。2026-11-09)
+    pub opponent_cancel: u32,
+}
+
+/// 相手の次の1手が、届いた攻撃を打ち消す行数の見積もり。相手の攻撃ゲージ(REN の攻撃の合計)から REN 数を逆算し、
+/// 次の REN の攻撃を返す。ゲージが 0 なら 0(REN の始めは攻撃が 0〜1 行なので小さい)。
+/// 【2026-11-09】相手の REN 中に届いた攻撃は、相手が消した手の攻撃でその分だけ先に打ち消され、残りがせり上がる
+pub fn opponent_cancel(rules: &Rules, gauge: u32) -> u32 {
+    if gauge == 0 {
+        return 0;
+    }
+    let mut sum = 0;
+    for ren in 0..40 {
+        if sum >= gauge {
+            return rules.combo_attack(ren);
+        }
+        sum += rules.combo_attack(ren);
+    }
+    rules.combo_attack(40)
 }
 
 /// 予告の影響(探索の中で計算する)。
@@ -219,6 +306,9 @@ impl Default for Weights {
             air_tsd_slot: 0.0,
             spawn_margin: 0,
             ren_cut: 0.0,
+            ren_threat_overflow: 0.0,
+            pivot_opening_rows: 0,
+            c4w_response: 0,
             tsd_stock: 0.0,
             tsd_low_fire: 0.0,
             tsd_counter: 0.0,
@@ -227,15 +317,33 @@ impl Default for Weights {
             ren_potential: 0.0,
             tsd_slot_any: 0.0,
             pc_chance: 0.0,
+            tetris_tsd_flex: 0.0,
+            after_pc_seed: false,
+            after_pc_no_rival: false,
+            td_attacked_well: false,
+            td_attacked_clears: 1,
             soft_drop_rows: 0.0,
             soft_drop_non_spin: 0.0,
+            input_keys: 0.0,
             tst_slot: 0.0,
             c_spin: 0.0,
             template_piece: 8.0,
             opening_tsd: 12.0,
+            template_bonus_only: false,
             tst_slot_low: 0.0,
+            garbage_hole_overstack: -1.5,
             rival_ren: 0.0,
+            rival_deficit: 0.0,
+            rival_early_fire: 0.0,
+            rival_fire_height: 15,
             rush_attack: 0.0,
+            c4w_spawn_danger: false,
+            rush_pressure: 0.0,
+            rush_lethal: 0.0,
+            rush_height: 0.0,
+            rush_ren_overflow: 0.0,
+            rush_finish: 0.0,
+            rush: None,
         }
     }
 }
@@ -271,6 +379,7 @@ pub fn reward(w: &Weights, rules: &Rules, mv: &Move, result: &ClearResult) -> f3
         r += w.soft_drop_non_spin * mv.soft_drop_sections as f32;
     }
     r += w.mid_air_stop * mv.mid_air_stops as f32;
+    r += w.input_keys * mv.inputs as f32;
     if mv.soft_drop_sections > 0 {
         // ソフトドロップで落とした段数の目安: 出現位置の高さから置いた位置まで
         let rows = (rules.spawn().y - mv.placement.location.y).max(0);
@@ -291,12 +400,18 @@ pub fn evaluate(w: &Weights, rules: &Rules, board: &Board, back_to_back: bool, c
     if w.tsd_slot_any != 0.0 {
         e += w.tsd_slot_any * shape::tsd_slots(board).len().min(2) as f32;
     }
+    if w.tetris_tsd_flex != 0.0 {
+        e += w.tetris_tsd_flex * shape::tetris_tsd_flex(board).min(2) as f32;
+    }
     // 【2026-11-01・ユーザー】いきなり REN を組むのは対策されると弱いので、序盤は中あけの項目を使わない
     // 【2026-11-03・ユーザー】作戦層の「早撃ち」では C4W を組まない
     if !ctx.opening && ctx.strategy != Strategy::Rush {
         e += center_well_value(w, rules, board, ctx);
         if ctx.strategy == Strategy::C4WRival && w.rival_ren != 0.0 {
             e += w.rival_ren * ren_potential(rules, board, ctx.consecutive_clears) as f32;
+        }
+        if ctx.strategy == Strategy::C4WRival && w.rival_deficit != 0.0 {
+            e += w.rival_deficit * ctx.opponent_rows.saturating_sub(shape::ren_rows(board)) as f32;
         }
     }
     if w.pc_chance != 0.0 && shape::pc_possible(board) {
@@ -393,10 +508,29 @@ fn center_well_value(w: &Weights, rules: &Rules, board: &Board, ctx: &EvalContex
     if w.center_well_seed != 0.0 && shape::center_well_seed(board) == 3 {
         e += w.center_well_seed;
     }
+    if w.garbage_hole_overstack != 0.0 {
+        e += w.garbage_hole_overstack * shape::garbage_hole_overstack(board) as f32;
+    }
     if w.ren_potential != 0.0 {
         e += w.ren_potential * ren_potential(rules, board, ctx.consecutive_clears) as f32;
     }
     e
+}
+
+/// 対抗の時に、相手より少ない行数のまま撃ち始めた手の点。相手が撃ち始めて行数が減れば、減点は無くなる。
+pub fn rival_fire_value(w: &Weights, strategy: Strategy, prior: u32, lines: u32, board_before: &Board, opponent_rows: u32) -> f32 {
+    if w.rival_early_fire == 0.0 || strategy != Strategy::C4WRival || prior > 0 || lines == 0 {
+        return 0.0;
+    }
+    if board_before.max_height() > w.rival_fire_height {
+        return 0.0;
+    }
+    let rows = shape::ren_rows(board_before);
+    if rows >= 2 && rows < opponent_rows {
+        w.rival_early_fire
+    } else {
+        0.0
+    }
 }
 
 /// TSD・TST を撃つタイミングの点。`height` は置く前の盤面の高さ(せり上がった分を含む)、`pending` は置く前の予告の行数。
@@ -445,10 +579,27 @@ pub fn ren_potential(rules: &Rules, board: &Board, consecutive_clears: u32) -> u
 
 /// 対戦の駆け引きの評価。`outgoing` はこの局面までに相手に届く攻撃(相殺に使った分を除く)、
 /// `our_top` は自分の盤面の高さ(予告の分を上乗せしたもの)。
-pub fn battle_value(w: &Weights, ctx: &BattleContext, outgoing: u32, our_top: u32) -> f32 {
+/// `chunk` はこの局面までに1回にまとめて届く攻撃の最大(REN 中にためてまとめて送る分。自分への予告の相殺を除く)。
+pub fn battle_value(w: &Weights, ctx: &BattleContext, outgoing: u32, chunk: u32, our_top: u32) -> f32 {
     let mut v = w.attack_sent * outgoing as f32;
     if ctx.strategy == Strategy::Rush {
         v += w.rush_attack * outgoing as f32;
+        v += w.rush_height * our_top as f32;
+        if let Some(danger) = ctx.opponent_spawn_danger {
+            v += w.rush_pressure * outgoing as f32 * (danger as f32 / 20.0);
+            let margin = 20u32.saturating_sub(danger);
+            let net = chunk.saturating_sub(ctx.opponent_cancel);
+            if chunk > 0 && net >= margin {
+                v += w.rush_lethal;
+            }
+            if margin <= 8 {
+                v += w.rush_finish * net.min(margin) as f32 / margin.max(1) as f32;
+            }
+        }
+        let ren_top = our_top + ctx.opponent_ren;
+        if ren_top > 20 {
+            v += w.rush_ren_overflow * (ren_top - 20) as f32;
+        }
     }
     if let Some(danger) = ctx.opponent_danger {
         v += w.attack_sent_danger * outgoing as f32 * (danger as f32 / 20.0);
@@ -459,6 +610,10 @@ pub fn battle_value(w: &Weights, ctx: &BattleContext, outgoing: u32, our_top: u3
         let threat_top = our_top + ctx.opponent_threat;
         if threat_top > 20 {
             v += w.threat_overflow * (threat_top - 20) as f32;
+        }
+        let ren_top = our_top + ctx.opponent_ren;
+        if ren_top > 20 {
+            v += w.ren_threat_overflow * (ren_top - 20) as f32;
         }
     }
     v
@@ -571,12 +726,31 @@ mod tests {
         let w = Weights::default();
         // 相手は17段(余裕3段)。4行届けばとどめ、2行では足りない
         let ctx = BattleContext { opponent_danger: Some(17), ..Default::default() };
-        let lethal = battle_value(&w, &ctx, 4, 5);
-        let not = battle_value(&w, &ctx, 2, 5);
+        let lethal = battle_value(&w, &ctx, 4, 4, 5);
+        let not = battle_value(&w, &ctx, 2, 2, 5);
         assert!(lethal - not > w.lethal * 0.9, "{lethal} {not}");
         // 相手の情報が無ければ、届く攻撃の点(既定 0)だけ
         let none = BattleContext::default();
-        assert_eq!(battle_value(&w, &none, 4, 5), 0.0);
+        assert_eq!(battle_value(&w, &none, 4, 4, 5), 0.0);
+    }
+
+    #[test]
+    fn 早撃ちのとどめは相手の相殺を引く() {
+        let rules = Rules::ppt2();
+        assert_eq!(opponent_cancel(&rules, 0), 0);
+        // ゲージ6 = 0+0+1+1+2+2 → 次は6REN目で3行
+        assert_eq!(opponent_cancel(&rules, 6), 3);
+        assert_eq!(opponent_cancel(&rules, 40), 5);
+        let w = Weights { rush_lethal: 10.0, ..Weights::default() };
+        // 相手は出現位置17段(余裕3段)で、次の1手で3行打ち消す
+        let ctx = BattleContext {
+            opponent_spawn_danger: Some(17),
+            opponent_cancel: 3,
+            strategy: Strategy::Rush,
+            ..Default::default()
+        };
+        assert_eq!(battle_value(&w, &ctx, 6, 6, 0), 10.0, "6行まとめてなら届く");
+        assert_eq!(battle_value(&w, &ctx, 6, 4, 0), 0.0, "4行ずつでは打ち消される");
     }
 
     #[test]
@@ -690,6 +864,24 @@ mod tests {
         let low = reward(&w, &rules, &mv(1), &result);
         let high = reward(&w, &rules, &mv(11), &result);
         assert!((high - low - 1.0).abs() < 1e-4, "10段の差で 0.1 × 10 = 1.0 の差: {low} {high}");
+    }
+
+    #[test]
+    fn キーの数だけ点を付ける() {
+        // 【2026-11-08・ユーザー「移動速度を早くする学習」】左右移動・回転のキー1回ごとに input_keys
+        use tetrisai_core::{Placement, Rotation};
+        let w = Weights { input_keys: -0.2, ..Weights::default() };
+        let rules = Rules::ppt2();
+        let mv = |inputs: u8| Move {
+            placement: Placement { location: PieceLocation::new(Piece::L, Rotation::North, 4, 5), spin: Spin::None },
+            mid_air_stops: 0,
+            soft_drop_sections: 0,
+            inputs,
+        };
+        let result = ClearResult::default();
+        let few = reward(&w, &rules, &mv(1), &result);
+        let many = reward(&w, &rules, &mv(5), &result);
+        assert!((few - many - 0.8).abs() < 1e-4, "4キーの差で 0.2 × 4 = 0.8: {few} {many}");
     }
 
     #[test]

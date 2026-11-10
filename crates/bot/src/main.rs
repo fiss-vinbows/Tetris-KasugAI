@@ -50,8 +50,10 @@ struct Best {
     width: usize,
     /// 狙い筋の文言(TBP の拡張 `aim`。TBA の情報パネルの「狙い」に出す)
     aim: String,
-    /// C4W で続けられる REN の見込み(TBP の拡張 `c4w_ren`。2026-11-05)
+    /// C4W で続けて消せる回数の見込み(今続いている分を含む。TBP の拡張 `c4w_ren` には `ren_count` で REN 数にして送る。2026-11-05)
     c4w_ren: u32,
+    /// Downstack(掘り)で続けて消せる回数の見込み(送る時は `ren_count` で REN 数にする)と、見えているミノをすべて使って消し切れたか(2026-11-07)
+    downstack_ren: (u32, bool),
 }
 
 #[derive(Default)]
@@ -92,7 +94,8 @@ fn main() {
     let rules = Rules::ppt2();
     // 【2026-11-01・ユーザー】序盤は TD系テンプレか素の状態をランダムで選ぶ(空の盤面を受け取るたびに選び直す)
     let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
-    // 【2026-11-05・ユーザー】全自動の設定で開幕に目指すものを選ぶ(--opening default|random|td|tsd|seed3)
+    // 【2026-11-05・ユーザー】全自動の設定で開幕に目指すものを選ぶ(--opening default|random|td|tsd|seed3|pco)
+    // 【2026-11-09】pco: 開幕パフェ(見込みが低ければ TDテンプレか開幕TSD。C4W の相手が REN を始める前に10行届ける)
     let mode = match arg_value(&args, "--opening") {
         Some(s) => OpeningMode::parse(s).unwrap_or_else(|| {
             eprintln!("--opening の値が分かりません: {s}");
@@ -100,13 +103,20 @@ fn main() {
         }),
         None => OpeningMode::default(),
     };
-    let mut opening = (!args.iter().any(|a| a == "--no-opening")).then(|| OpeningTracker::with_mode(seed, mode));
-    let mut observe = |root: &mut Root| {
+    let mut opening = (!args.iter().any(|a| a == "--no-opening")).then(|| {
+        OpeningTracker::with_mode(seed, mode)
+            .with_after_pc(weights.after_pc_seed, weights.after_pc_no_rival)
+            .with_attacked_well(weights.td_attacked_well, weights.td_attacked_clears)
+    });
+    let mut bag_counter = BagCounter::default();
+    let observe = |opening: &mut Option<OpeningTracker>, root: &mut Root| {
         if let Some(tracker) = opening.as_mut() {
             root.opening = tracker.observe(root, &rules);
+            root.opening_well = tracker.well_now();
         }
     };
     // 【2026-11-03・ユーザー】作戦層: 相手の盤面(battle で受け取る。全自動だけ)を見て、C4W で対抗するか早撃ちするかを選ぶ
+    let (c4w_response, pivot_opening_rows) = (weights.c4w_response, weights.pivot_opening_rows);
     let mut strategy = StrategyTracker::default();
 
     let bot = Arc::new(Bot { shared: Mutex::new(Shared::default()), wake: Condvar::new(), generation: AtomicU64::new(0) });
@@ -146,8 +156,20 @@ fn main() {
             "rules" => send(json!({"type": "ready"})),
             "start" => match parse_start(&msg) {
                 Some(mut root) => {
-                    observe(&mut root);
+                    // TBA は袋の残り(randomizer.bag_state)を送らないので、見えたミノの数から数える(2026-11-09)
+                    if msg["randomizer"]["bag_state"].is_null() {
+                        root.bag = bag_counter.on_start(&root);
+                    }
+                    observe(&mut opening, &mut root);
                     root.strategy = strategy.current();
+                    // テンプレでパフェまで撃った後は「C4W で対抗」を使わない(2026-11-09)
+                    // 【2026-11-10】速攻の相手(テンプレの途中で攻撃された)には、TSD の後 C4W に移る
+                    if opening.as_ref().is_some_and(|t| t.force_rival()) && root.strategy == tetrisai_engine::Strategy::Normal {
+                        root.strategy = tetrisai_engine::Strategy::C4WRival;
+                    }
+                    if opening.as_ref().is_some_and(|t| t.suppress_rival()) && root.strategy != tetrisai_engine::Strategy::Normal {
+                        root.strategy = tetrisai_engine::Strategy::Normal;
+                    }
                     let mut s = bot.shared.lock().unwrap();
                     s.pending_start = root.queue.is_empty();
                     s.root = Some(root);
@@ -158,10 +180,11 @@ fn main() {
             },
             "new_piece" => match msg["piece"].as_str().and_then(parse_piece) {
                 Some(piece) => {
+                    bag_counter.seen.push(piece);
                     let mut s = bot.shared.lock().unwrap();
                     if let Some(root) = s.root.as_mut() {
                         root.push_piece(piece);
-                        observe(root);
+                        observe(&mut opening, root);
                         s.pending_start = false;
                         // それまでの最善手は同じ局面のものなので残しておく(新しい探索で置き換わる)
                         bot.bump(&mut s);
@@ -176,7 +199,7 @@ fn main() {
                         if !root.play(&placement, &rules) {
                             eprintln!("play の手のミノが操作ミノ・HOLD のどちらでもない: {line}");
                         }
-                        observe(root);
+                        observe(&mut opening, root);
                     }
                     s.best = None;
                     bot.bump(&mut s);
@@ -197,7 +220,22 @@ fn main() {
                     root.incoming = parse_incoming(&msg["incoming"]);
                     root.gauge = msg["gauge"].as_u64().unwrap_or(0) as u32;
                     root.opponent = parse_opponent(&msg["opponent"]);
-                    root.strategy = strategy.observe(&root.state.board, root.opponent.as_ref().map(|o| &o.board));
+                    root.strategy = strategy
+                        .observe(&root.state.board, root.opponent.as_ref().map(|o| &o.board))
+                        .forced(c4w_response);
+                    // 【2026-11-10】速攻の相手(テンプレの途中で攻撃された)には、TSD の後 C4W に移る
+                    if opening.as_ref().is_some_and(|t| t.force_rival()) && root.strategy == tetrisai_engine::Strategy::Normal {
+                        root.strategy = tetrisai_engine::Strategy::C4WRival;
+                    }
+                    if opening.as_ref().is_some_and(|t| t.suppress_rival()) && root.strategy != tetrisai_engine::Strategy::Normal {
+                        root.strategy = tetrisai_engine::Strategy::Normal;
+                    }
+                    // 【2026-11-07・ユーザー「相手の C4W になすすべなく負ける」】相手の C4W が育ってきたら序盤を切り上げて対抗する
+                    if let (Some(tracker), Some(o)) = (opening.as_mut(), root.opponent.as_ref()) {
+                        if tracker.pivot_if_opponent_c4w(&o.board, pivot_opening_rows) {
+                            root.opening = tetrisai_engine::Opening::None;
+                        }
+                    }
                     bot.bump(&mut s);
                 }
             }
@@ -232,6 +270,8 @@ fn worker(bot: &Bot, weights: &Weights, rules: &Rules, max_width: usize, specula
         let cancelled = || bot.generation.load(Ordering::SeqCst) != generation;
         let started = Instant::now();
         let mut nodes = 0u64;
+        // 最初の手を遅らせないように、一番狭い探索の後で数える
+        let mut downstack_ren = (0, false);
         let mut width = 8;
         while width <= max_width {
             let options = SearchOptions { width, max_depth: 6, speculate };
@@ -245,8 +285,11 @@ fn worker(bot: &Bot, weights: &Weights, rules: &Rules, max_width: usize, specula
             let aim = tetrisai_engine::aim::describe(&root, &result.plan, rules);
             let rows = tetrisai_engine::shape::ren_rows(&root.state.board);
             let c4w_ren = if rows > 0 { root.state.consecutive_clears + rows } else { 0 };
-            s.best = Some(Best { result, nodes, nps, width, aim, c4w_ren });
+            s.best = Some(Best { result, nodes, nps, width, aim, c4w_ren, downstack_ren });
             drop(s);
+            if width == 8 {
+                downstack_ren = tetrisai_engine::aim::downstack_ren(&root, rules);
+            }
             width *= 2;
         }
     }
@@ -269,7 +312,10 @@ fn suggestion(best: Option<&Best>) -> Value {
         },
         // 【2026-11-01・ユーザー】狙い筋(TBA の情報パネルの「狙い」)。改行で2行まで
         "aim": best.aim,
-        "c4w_ren": best.c4w_ren,
+        // 【2026-11-08・ユーザー「REN 見込みが1つずれている。最初は0から」】続けて消す回数ではなく REN 数(最初の消去は 0REN)を送る
+        "c4w_ren": ren_count(best.c4w_ren),
+        "downstack_ren": ren_count(best.downstack_ren.0),
+        "downstack_ren_open": best.downstack_ren.1,
         "difficulty": candidates.iter().map(|c| json!({
             "soft_drop_sections": c.mv.soft_drop_sections,
             "mid_air_stops": c.mv.mid_air_stops,
@@ -312,6 +358,56 @@ fn parse_opponent(v: &Value) -> Option<Opponent> {
     })
 }
 
+/// 対局の始めから見えたミノの並びで、袋(7種1巡)の残りを数える(2026-11-09)。
+/// TBA は TBP の randomizer.bag_state を送らないので、袋の残りが分からず、開幕パフェの見込みや先読みが不正確になっていた。
+#[derive(Default)]
+struct BagCounter {
+    /// 対局の始めから見えたミノ(NEXT に出た順)
+    seen: Vec<Piece>,
+}
+
+impl BagCounter {
+    /// start を受け取った時。対局の始め(空の盤面・HOLD なし・NEXT がすべて違うミノ)なら数え直す。
+    /// 返り値は NEXT の最後のミノの後で今の袋に残っているミノ(分からなければ空)。
+    fn on_start(&mut self, root: &Root) -> Vec<Piece> {
+        let fresh_bag = {
+            let first: Vec<Piece> = root.queue.iter().take(7).copied().collect();
+            (1..first.len()).all(|i| !first[..i].contains(&first[i]))
+        };
+        if root.state.board.is_empty() && root.hold.is_none() && fresh_bag {
+            self.seen = root.queue.clone();
+        } else {
+            self.catch_up(&root.queue);
+        }
+        self.bag()
+    }
+
+    /// 対局の途中の start(TBA の考え直し)で、new_piece で受け取っていないミノが NEXT に見えていれば足す(2026-11-09)。
+    /// 見えたミノの末尾と NEXT の頭が3個以上重なる所で合わせる(合わなければそのまま)。
+    fn catch_up(&mut self, queue: &[Piece]) {
+        let n = self.seen.len();
+        for m in (3..=queue.len().min(n)).rev() {
+            if self.seen[n - m..] == queue[..m] {
+                self.seen.extend_from_slice(&queue[m..]);
+                return;
+            }
+        }
+    }
+
+    fn bag(&self) -> Vec<Piece> {
+        let k = self.seen.len() % 7;
+        let recent = &self.seen[self.seen.len() - k..];
+        // 今の袋で見えたミノに重なりがあれば、数え方が合っていない
+        if (1..recent.len()).any(|i| recent[..i].contains(&recent[i])) {
+            return Vec::new();
+        }
+        if k == 0 {
+            return Vec::new();
+        }
+        Piece::ALL.iter().copied().filter(|p| !recent.contains(p)).collect()
+    }
+}
+
 fn parse_start(msg: &Value) -> Option<Root> {
     let board = parse_board(&msg["board"])?;
     let queue = msg["queue"].as_array()?.iter().map(|p| p.as_str().and_then(parse_piece)).collect::<Option<Vec<_>>>()?;
@@ -345,6 +441,11 @@ fn parse_incoming(v: &Value) -> Vec<IncomingGarbage> {
         .unwrap_or_default()
 }
 
+/// 続けて消す回数を REN 数にする(1回目の消去は 0REN、2回続けて 1REN)。
+fn ren_count(clears: u32) -> u32 {
+    clears.saturating_sub(1)
+}
+
 fn arg_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(|s| s.as_str())
 }
@@ -373,6 +474,14 @@ fn load_weights(path: Option<&str>) -> Result<Weights, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 最初の消去は0REN() {
+        assert_eq!(ren_count(0), 0, "消せない");
+        assert_eq!(ren_count(1), 0, "1回だけ消す");
+        assert_eq!(ren_count(2), 1);
+        assert_eq!(ren_count(8), 7, "8行の C4W を撃ち切ると 7REN");
+    }
 
     #[test]
     fn startを読める() {
@@ -436,5 +545,25 @@ mod tests {
         assert!(load_weights(dir.join("no-such.toml").to_str()).is_err());
         // 指定が無ければ既定値
         assert_eq!(load_weights(None).unwrap(), Weights::default());
+    }
+
+    #[test]
+    fn 袋の残りを見えたミノの数から数える() {
+        use Piece::*;
+        let mut c = BagCounter::default();
+        // 対局の始め: NEXT に6種見えている → 残りは見えていない1種
+        let root = Root { queue: vec![I, O, T, L, J, S], ..Default::default() };
+        assert_eq!(c.on_start(&root), vec![Z]);
+        // 7種目と次の袋の1つ目が見えた → 次の袋の残りは6種
+        c.seen.push(Z);
+        c.seen.push(T);
+        assert_eq!(c.bag(), vec![I, O, L, J, S, Z]);
+        // 対局の途中の start(おじゃまで盤面が変わった)では数え直さない
+        let mid = Root { state: PlayerState { board: Board::from_rows(&["#########."]), ..Default::default() }, queue: vec![O, T, L, J, S, Z], ..Default::default() };
+        assert_eq!(c.on_start(&mid), vec![I, O, L, J, S, Z]);
+        // 途中の start で、new_piece で受け取っていない I・O が NEXT に見えていれば足す
+        let later = Root { state: mid.state.clone(), queue: vec![S, Z, T, I, O], ..Default::default() };
+        assert_eq!(c.on_start(&later), vec![L, J, S, Z]);
+        assert_eq!(c.seen.len(), 10);
     }
 }

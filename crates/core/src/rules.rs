@@ -53,6 +53,18 @@ pub struct GarbageRules {
     pub send_after_ren_ends: bool,
     /// 攻撃を自分への予告の打ち消し(相殺)に先に使うか
     pub cancel_incoming_first: bool,
+    /// ラインを消した手(REN の途中を含む)でも、相殺しきれなかった予告がせり上がるか(false ならラインを消さない手だけ)。
+    /// 【2026-11-08・ユーザー「REN 中もせり上がる」】
+    #[serde(default)]
+    pub rise_on_clear: bool,
+    /// 1回の攻撃の中で、次の行も同じ穴の列にする確率(1 なら攻撃の中は同じ列。`hole_changes_within_attack` が false の時だけ使う)。
+    /// 【2026-11-09】実機の盤面 2,917 個で、同じ穴の列が続いた行数は 1行 6834・2行 3585・3行 1671・4行 834… と1行ごとに約半分
+    #[serde(default = "one")]
+    pub hole_keep_chance: f32,
+}
+
+fn one() -> f32 {
+    1.0
 }
 
 impl Rules {

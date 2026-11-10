@@ -1,0 +1,64 @@
+# run16(2026-11-09): 8時間の学習の第1回(開幕 C4W なし・2.3時間)の後半の平均。出発点と相手は run15
+# 実機に合わせた1手の時間(キー1回 33ms・ソフトドロップ 1段 33ms)で時間ありの対局。input_keys・soft_drop_rows・
+# soft_drop_non_spin も調整した。第2回・第3回の候補は勝ち越せず採らなかった
+# 対 run15(新しい種): 同じ開幕 no_c4w 50.8%(2000局)・random 54.5% / C4W 相手 24.7%(run15 は 19.3%)/
+# C4W 側 85.6%(run15 は 79.4%)/ 対 CC2 64.2%(run15 は 62.8%)。ソフトドロップの手 5.7%→4.9%
+cell_coveredness = -0.5085421247141702
+max_cell_covered_height = 6
+holes = -1.4843572207859583
+row_transitions = -2.158618790762765
+height = 0.300608502967017
+height_upper_half = -2.1642139979771207
+height_upper_quarter = -5.842106342315674
+tetris_well_depth = -0.1697425310100828
+tslot = [-0.19668175280094147, 1.5142876761300224, 5.3193150247846335, 2.5485898767198836]
+has_back_to_back = 0.7592986907277789
+wasted_t = -0.7624357683318002
+softdrop = -0.20000000298023224
+normal_clears = [0.0, -0.7365247011184692, -0.6143349920000348, -2.7981788430895125, 2.9721133027757918]
+mini_spin_clears = [0.0, 1.8497342722756522, 0.15003778891904013]
+spin_clears = [0.0, 0.3780654413359506, 1.2849321705954415, 2.3260415622166226]
+back_to_back_clear = 1.3604657649993896
+back_to_back_broken = -4.0
+combo_attack = 2.0568106515066966
+perfect_clear = 19.661261694771902
+perfect_clear_override = true
+soft_drop_section = -0.5
+mid_air_stop = -1.5
+pending_garbage = 0.11720638296433858
+overflow = -8.62734249659947
+attack_sent = 0.000583398954144546
+attack_sent_danger = 2.513258457183838
+lethal = 1.8259916646139962
+threat_overflow = -1.1169123649597168
+center_well_rows = 0.8663766213825771
+center_well_side_diff = 0.38945736629622324
+air_tsd_slot = 12.03062629699707
+spawn_margin = 1
+ren_cut = -20.0
+ren_threat_overflow = -0.009129097150954684
+pivot_opening_rows = 2
+c4w_response = 1
+tsd_stock = 0.0
+tsd_low_fire = 0.0
+tsd_counter = 0.018509831595500664
+tsd_hold_height = 8
+center_well_seed = 6.732053211757115
+ren_potential = 1.7004081010818481
+tsd_slot_any = 0.4469216891697475
+pc_chance = -0.034376725022281916
+soft_drop_rows = -0.1275011364902769
+soft_drop_non_spin = -3.915410723005022
+input_keys = 0.08809356497866767
+tst_slot = 1.227741309574672
+c_spin = 3.8858045509883334
+template_piece = 8.0
+opening_tsd = 12.0
+template_bonus_only = false
+tst_slot_low = 4.0
+garbage_hole_overstack = -1.5
+rival_ren = 0.39339310782296316
+rival_deficit = -0.05121870658227375
+rival_early_fire = 0.0027374603752312915
+rival_fire_height = 15
+rush_attack = 1.0483155931745256

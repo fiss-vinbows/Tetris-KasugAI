@@ -5,9 +5,10 @@
 //! 2. +側と−側を、同じミノ列で手番を入れ替えて何局も対戦させる(同じプロセス内の探索、幅は固定)
 //! 3. 勝ち越した側へ重みを動かす: θ += 学習率 × c × (+側の勝ち − −側の勝ち)/局数 × δ
 //!
-//! 初心者向けの減点(ソフトドロップ・途中で止める)と、ソフトドロップの段数(`soft_drop_rows`)は調整しない。
-//! 対戦シミュレーションは1手を1単位で進めるだけでソフトドロップにかかる時間を再現しないので、調整すると
-//! 時間の損が見えないまま減点が削られるため。中あけ積みを始める高さ(ユーザーの指定)も調整しない。
+//! 初心者向けの減点(ソフトドロップの区間・途中で止める)は調整しない。中あけ積みを始める高さ(ユーザーの指定)も調整しない。
+//! 【2026-11-08・ユーザー「移動速度を早くする学習」】時間ありの対局(--timed)は1手の実機の時間(キーの数・ソフトドロップの
+//! 段数・消去の演出)を数えるので、ソフトドロップの段数(`soft_drop_rows`)・Tスピン以外のソフトドロップ(`soft_drop_non_spin`)・
+//! キー1回(`input_keys`)も調整する(時間の損が勝敗に表れる)。
 //!
 //! 使い方(TetrisAI フォルダで):
 //!     cargo run --release -p tetrisai-arena --bin tune -- [オプション]
@@ -22,6 +23,8 @@
 //!   --no-opponent          相手の情報を使わずに対戦させる(TBA は相手の盤面をまだ読まないので、実際に使う条件に合わせる)
 //!   --lr <数>              最初の学習率(既定 0.5)
 //!   --c <数>               最初のずらし幅(重みの大きさに対する割合。既定 0.25)
+//!   --seed-offset <数>     ミノ列とずらす向きの乱数をずらす(既定 0)。同じ出発点から別の調整をする時に変える
+//!                          (2026-11-08: 変えずに2回走らせたら、2回目が1回目とほぼ同じ重みになった)
 
 use std::fs;
 use std::io::Write;
@@ -36,10 +39,10 @@ use serde_json::json;
 use tetrisai_arena::agent::EngineAgent;
 use tetrisai_arena::game::{play_game, GameConfig};
 use tetrisai_core::Rules;
-use tetrisai_engine::Weights;
+use tetrisai_engine::{OpeningMode, OpeningTracker, Weights};
 
 /// 調整する重みの名前(Weights のフィールド。配列は [添字])。
-const NAMES: [&str; 40] = [
+const NAMES: [&str; 54] = [
     "cell_coveredness",
     "holes",
     "row_transitions",
@@ -80,6 +83,20 @@ const NAMES: [&str; 40] = [
     "c_spin",
     "center_well_seed",
     "ren_potential",
+    "rush_attack",
+    "rival_ren",
+    "ren_threat_overflow",
+    "tsd_counter",
+    "rival_deficit",
+    "rival_early_fire",
+    "soft_drop_rows",
+    "soft_drop_non_spin",
+    "input_keys",
+    "rush_pressure",
+    "rush_lethal",
+    "rush_height",
+    "rush_ren_overflow",
+    "rush_finish",
 ];
 
 fn get_params(w: &Weights) -> Vec<f64> {
@@ -124,6 +141,20 @@ fn get_params(w: &Weights) -> Vec<f64> {
         w.c_spin,
         w.center_well_seed,
         w.ren_potential,
+        w.rush_attack,
+        w.rival_ren,
+        w.ren_threat_overflow,
+        w.tsd_counter,
+        w.rival_deficit,
+        w.rival_early_fire,
+        w.soft_drop_rows,
+        w.soft_drop_non_spin,
+        w.input_keys,
+        w.rush_pressure,
+        w.rush_lethal,
+        w.rush_height,
+        w.rush_ren_overflow,
+        w.rush_finish,
     ];
     v.iter().map(|&x| x as f64).collect()
 }
@@ -161,6 +192,37 @@ fn set_params(w: &mut Weights, v: &[f64]) {
     w.c_spin = f(37);
     w.center_well_seed = f(38);
     w.ren_potential = f(39);
+    w.rush_attack = f(40);
+    w.rival_ren = f(41);
+    w.ren_threat_overflow = f(42);
+    w.tsd_counter = f(43);
+    w.rival_deficit = f(44);
+    w.rival_early_fire = f(45);
+    w.soft_drop_rows = f(46);
+    w.soft_drop_non_spin = f(47);
+    w.input_keys = f(48);
+    w.rush_pressure = f(49);
+    w.rush_lethal = f(50);
+    w.rush_height = f(51);
+    w.rush_ren_overflow = f(52);
+    w.rush_finish = f(53);
+}
+
+/// 調整した値 `theta` から重みを作る。`rush_profile` なら、早撃ちの間だけ使う重み一式(`Weights::rush`)に入れる(2026-11-09)
+fn build(base: &Weights, theta: &[f64], rush_profile: bool) -> Weights {
+    let mut w = base.clone();
+    if rush_profile {
+        let mut r = base.rush.as_deref().cloned().unwrap_or_else(|| {
+            let mut r = base.clone();
+            r.rush = None;
+            r
+        });
+        set_params(&mut r, theta);
+        w.rush = Some(Box::new(r));
+    } else {
+        set_params(&mut w, theta);
+    }
+    w
 }
 
 /// 学習率とずらし幅の減り方(反復回数 k に対して)
@@ -183,11 +245,30 @@ fn main() {
     let games = (num("--games", 24.0) as usize / 2 * 2).max(2);
     let width = num("--width", 64.0) as usize;
     let lr0 = num("--lr", 0.5);
+    let seed_offset = num("--seed-offset", 0.0) as u64;
     let c0 = num("--c", 0.25);
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
     let threads = num("--threads", cores as f64) as usize;
     let rules = Rules::ppt2();
     let use_opponent = !args.iter().any(|a| a == "--no-opponent");
+    // 【2026-11-07・ユーザー「相手の C4W になすすべなく負ける」】--vs <重み> で、+側と−側を同じ相手・同じミノ列で戦わせて比べる。
+    // 相手は3組のうち2組が開幕 C4W(seed3)、1組が既定の開幕。こちらの開幕は --own-opening(既定 no_c4w)
+    let vs: Option<Weights> =
+        get("--vs").map(|path| toml::from_str(&fs::read_to_string(&path).expect("--vs の重みを読めない")).expect("--vs の重みが壊れている"));
+    // 【2026-11-09】--rush-profile: 早撃ちの間だけ使う重み一式を調整する(ふだんの重みは変えない)。
+    // --only a,b,c: 名前を挙げた重みだけ動かす。--vs-opening: 相手の開幕を固定する(既定は3組のうち2組が seed3)
+    let rush_profile = args.iter().any(|a| a == "--rush-profile");
+    let only: Option<Vec<String>> = get("--only").map(|s| s.split(',').map(|x| x.trim().to_string()).collect());
+    if let Some(only) = &only {
+        for n in only {
+            assert!(NAMES.contains(&n.as_str()), "--only の名前が無い: {n}");
+        }
+    }
+    // 【2026-11-10】--vs-opening td,tsd,seed3 のように並べると、1組ごとに順に使う(TD 前提の作戦を3種類の相手で調整する)
+    let vs_openings: Vec<OpeningMode> = get("--vs-opening")
+        .map(|s| s.split(',').map(|x| OpeningMode::parse(x).expect("--vs-opening の値")).collect())
+        .unwrap_or_default();
+    let own_opening = OpeningMode::parse(&get("--own-opening").unwrap_or_else(|| "no_c4w".to_string())).expect("--own-opening の値");
     let config = GameConfig {
         rules: rules.clone(),
         think: Duration::ZERO,
@@ -195,6 +276,7 @@ fn main() {
         adjudicate: true,
         block_margin: num("--block-margin", 0.0) as u32,
         timed: args.iter().any(|a| a == "--timed"),
+        time_pct: [100, num("--vs-time-pct", 100.0) as u32],
     };
 
     let base = match get("--init") {
@@ -202,7 +284,9 @@ fn main() {
         None => Weights::default(),
     };
     // ずらし幅の基準(最初の値の大きさ。0 に近い重みも動けるよう下限を付ける)
-    let scale: Vec<f64> = get_params(&base).iter().map(|x| x.abs().max(0.5)).collect();
+    let start_params = if rush_profile { get_params(base.rush.as_deref().unwrap_or(&base)) } else { get_params(&base) };
+    let scale: Vec<f64> = start_params.iter().map(|x| x.abs().max(0.5)).collect();
+    let movable: Vec<bool> = NAMES.iter().map(|n| only.as_ref().is_none_or(|o| o.iter().any(|x| x == n))).collect();
 
     // 続きから再開
     let state_path = out.join("state.json");
@@ -213,7 +297,7 @@ fn main() {
             println!("{} から再開(反復 {})", state_path.display(), v["k"]);
             (v["k"].as_u64().unwrap() as usize, theta)
         }
-        Err(_) => (0, get_params(&base)),
+        Err(_) => (0, start_params.clone()),
     };
     let log_path = out.join("log.csv");
     if !log_path.exists() {
@@ -226,20 +310,19 @@ fn main() {
     );
     let started = Instant::now();
     let deadline = Duration::from_secs_f64(hours * 3600.0);
-    let mut rng = StdRng::seed_from_u64(0x5EED ^ k as u64);
+    let mut rng = StdRng::seed_from_u64(0x5EED ^ k as u64 ^ seed_offset.wrapping_mul(0x9E37_79B9));
     let mut recent = Vec::new();
 
     while started.elapsed() < deadline && k < max_iterations {
         let c = perturbation(c0, k);
-        let delta: Vec<f64> = (0..NAMES.len()).map(|_| if rng.gen::<bool>() { 1.0 } else { -1.0 }).collect();
+        let delta: Vec<f64> =
+            (0..NAMES.len()).map(|i| if rng.gen::<bool>() { 1.0 } else { -1.0 } * if movable[i] { 1.0 } else { 0.0 }).collect();
         let shift: Vec<f64> = (0..NAMES.len()).map(|i| c * scale[i] * delta[i]).collect();
-        let mut plus = base.clone();
-        set_params(&mut plus, &theta.iter().zip(&shift).map(|(t, s)| t + s).collect::<Vec<_>>());
-        let mut minus = base.clone();
-        set_params(&mut minus, &theta.iter().zip(&shift).map(|(t, s)| t - s).collect::<Vec<_>>());
+        let plus = build(&base, &theta.iter().zip(&shift).map(|(t, s)| t + s).collect::<Vec<_>>(), rush_profile);
+        let minus = build(&base, &theta.iter().zip(&shift).map(|(t, s)| t - s).collect::<Vec<_>>(), rush_profile);
 
         // 同じミノ列で手番を入れ替えた2局を1組にする
-        let first_seed = 1_000_000 + (k * games) as u64;
+        let first_seed = 1_000_000 + (k * games) as u64 + seed_offset * 100_000_000;
         let next = AtomicUsize::new(0);
         let tally = Mutex::new((0usize, 0usize, 0usize, 0u64)); // (+勝, −勝, 引き分け, 手数の合計)
         std::thread::scope(|s| {
@@ -251,6 +334,31 @@ fn main() {
                     }
                     let seed = first_seed + (g / 2) as u64;
                     let plus_first = g.is_multiple_of(2);
+                    if let Some(vs) = &vs {
+                        // 同じ相手・同じミノ列で +側と−側を1局ずつ
+                        let mode = if vs_openings.is_empty() {
+                            if (g / 2) % 3 == 2 { OpeningMode::TemplateOrPlain } else { OpeningMode::Seed3 }
+                        } else {
+                            vs_openings[(g / 2) % vs_openings.len()]
+                        };
+                        let mut own = EngineAgent::new(if plus_first { plus.clone() } else { minus.clone() }, rules.clone(), width, "own");
+                        let mut rival = EngineAgent::new(vs.clone(), rules.clone(), width, "vs");
+                        let w = if plus_first { &plus } else { &minus };
+                        own.opening = Some(OpeningTracker::with_mode(seed, own_opening)
+                                .with_after_pc(w.after_pc_seed, w.after_pc_no_rival)
+                                .with_attacked_well(w.td_attacked_well, w.td_attacked_clears));
+                        rival.opening = Some(OpeningTracker::with_mode(seed ^ 0x55, mode));
+                        let result = play_game([&mut own, &mut rival], seed, &config).expect("同じプロセス内の対局は失敗しない");
+                        let mut t = tally.lock().unwrap();
+                        match (result.winner, plus_first) {
+                            (Some(0), true) => t.0 += 1,
+                            (Some(0), false) => t.1 += 1,
+                            (None, _) => t.2 += 1,
+                            _ => {}
+                        }
+                        t.3 += (result.stats[0].pieces + result.stats[1].pieces) as u64;
+                        continue;
+                    }
                     let mut p = EngineAgent::new(plus.clone(), rules.clone(), width, "+");
                     let mut m = EngineAgent::new(minus.clone(), rules.clone(), width, "-");
                     p.use_opponent = use_opponent;
@@ -296,20 +404,18 @@ fn main() {
             );
         }
         if k % 25 == 0 {
-            save(&out, k, &theta, &base);
+            save(&out, k, &build(&base, &theta, rush_profile), &theta);
         }
     }
-    save(&out, k, &theta, &base);
+    save(&out, k, &build(&base, &theta, rush_profile), &theta);
     println!("終了: 反復 {k}、経過 {:.1} 時間", started.elapsed().as_secs_f64() / 3600.0);
 }
 
 /// 途中経過(state.json)と、今の重み(latest.toml と、反復回数付きの控え)を保存する。
-fn save(out: &Path, k: usize, theta: &[f64], base: &Weights) {
+fn save(out: &Path, k: usize, w: &Weights, theta: &[f64]) {
     let state = json!({"k": k, "names": NAMES.to_vec(), "theta": theta});
     fs::write(out.join("state.json"), serde_json::to_string_pretty(&state).unwrap()).unwrap();
-    let mut w = base.clone();
-    set_params(&mut w, theta);
-    let text = toml::to_string(&w).unwrap();
+    let text = toml::to_string(w).unwrap();
     fs::write(out.join("latest.toml"), &text).unwrap();
     if k.is_multiple_of(100) {
         fs::write(out.join(format!("weights_k{k:05}.toml")), &text).unwrap();

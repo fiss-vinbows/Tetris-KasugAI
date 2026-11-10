@@ -39,6 +39,7 @@ fn main() {
                     Opening::Template(t) => format!("テンプレ {}", t.name),
                     Opening::Plain => "素".to_string(),
                     Opening::Tsd => "開幕TSD".to_string(),
+                    Opening::Pco(_) => "開幕パフェ".to_string(),
                     Opening::None => "なし".to_string(),
                 };
             }
