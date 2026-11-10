@@ -1,6 +1,6 @@
 [package]
 name = "tetrisai-engine"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 license.workspace = true
 description = "評価関数と探索"
