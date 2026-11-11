@@ -13,11 +13,13 @@
 //! 一致するものが自然に選ばれる(TBA の openers.py と同じ考え方)。図から外れた手か、`TEMPLATE_CLEARS` 回目に
 //! ラインを消した手(TST→TSD を撃ち切った)で序盤は終わる。おじゃまがせり上がった時は図をずらして続ける(2026-11-08)。序盤の間は中あけ REN の評価を使わない(`EvalContext::opening`)。
 
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 use serde::Deserialize;
 use tetrisai_core::board::WIDTH;
-use tetrisai_core::{generate, Board, Piece, PieceLocation, Rules};
+use tetrisai_core::{generate, Board, Piece, PieceLocation, PlayerState, Rules, Spin};
 
 use crate::search::Root;
 
@@ -29,6 +31,12 @@ pub const PLAIN_PIECES: u32 = 14;
 /// 活きる。TST→TSD→パフェで21段せり上げにより相手の構想をつぶせる」】図から外れるか、パフェで盤面が空になるまで続ける。
 /// これは図が想定しない消し方を延々と続けないための上限。
 pub const TEMPLATE_CLEARS: u32 = 5;
+
+/// `Template::continue_rate` で、分かっているミノの先に足して試す見えていないミノの数(環境変数 TD_LOOKAHEAD。比べる時用)
+fn continue_lookahead() -> usize {
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| std::env::var("TD_LOOKAHEAD").ok().and_then(|s| s.parse().ok()).unwrap_or(4))
+}
 
 /// おじゃまのせり上がりで図をずらす段数の上限
 const MAX_RISE: u32 = 12;
@@ -98,9 +106,20 @@ fn bits(cells: impl IntoIterator<Item = (i8, i8)>) -> [u64; WIDTH] {
 const EXCLUDED_TEMPLATES: [&str; 1] = ["タンドリーチキン積み"];
 
 /// 組めれば優先して狙うテンプレ。優先度の順(2026-11-07・ユーザー)。迷走砲の図は Iミノが左側のものだけ。
-const PRIORITY_TEMPLATES: [&str; 2] = ["はちみつ砲", "迷走砲"];
+/// 【2026-11-11・ユーザー「パフェができる確率が高いものを用いたい」】1人で組ませた時(`td_solo_probe`、1000局、1巡目を
+/// ソフトドロップなしで組める局の中で)の TST→TSD→パフェ は、はちみつ砲 38.3%・くろみつ砲 36.2%・迷走砲 23.8%・
+/// ホットケーキ積み 21.1%・PC-Spin 20.5%・ベーカリーTD 17.1%・皐月積み 9.6%。くろみつ砲を迷走砲の前に入れた
+/// (全体の TST→TSD→パフェ 30.3% → 37.7%。くろみつ砲は 98% の並びで1巡目をソフトドロップなしで組める)。
+/// 【2026-11-11・実機 debug_log_20261111_210217 の9局目】1巡目を組めるかの判定(`build`)が HOLD に残したミノを見ておらず、
+/// くろみつ砲を組めない並びでも選んでいた。直すと、くろみつ砲は 75% の並びで組めて、組めば TST 100%・TST→TSD→パフェ 54.0%
+/// (はちみつ砲 42.5%・迷走砲 34.0%)なので、くろみつ砲を先にした(全体の TST→TSD→パフェ 46.1% → 49.6%、1人で1000局)。
+const PRIORITY_TEMPLATES: [&str; 3] = ["くろみつ砲", "はちみつ砲", "迷走砲"];
 
-/// TD系テンプレ5種(`EXCLUDED_TEMPLATES` と `PRIORITY_TEMPLATES` は除く)。
+/// 優先テンプレがどれも組めない時に狙う順(2026-11-11)。1人で組ませた時(`td_solo_probe`、1000局)の TST→TSD→パフェは
+/// PC-Spin 31.4%・ベーカリーTD 28.3%・ホットケーキ積み 26.9%・皐月積み 12.0%。
+const OTHER_ORDER: [&str; 4] = ["PC-Spin", "ベーカリーTD", "ホットケーキ積み", "皐月積み"];
+
+/// ほかの TD系テンプレ4種(`EXCLUDED_TEMPLATES` と `PRIORITY_TEMPLATES` は除く)。
 pub fn td_templates() -> &'static [Arc<Template>] {
     static TEMPLATES: OnceLock<Vec<Arc<Template>>> = OnceLock::new();
     TEMPLATES.get_or_init(|| {
@@ -387,6 +406,50 @@ impl Template {
         })
     }
 
+    /// 盤面 `board` から、分かっているミノ(`queue`)の後に、袋の残り(`bag`)とその次の袋をランダムに並べて足した
+    /// `samples` 通りのミノ順で、すべてを図どおりに置き続けられる割合(0〜1)。足すのは見えていないミノ `continue_lookahead` 個まで。
+    /// 消した後は図を進めて続ける(TST の後の TSD・パフェの段も)。パフェで盤面が空になるか、撃った後にテンプレが終われば
+    /// そこで置き続けられたとみなす。`hard` なら T 以外はソフトドロップなし。`need_tsd` なら、TSD(Tスピンダブル以上)を撃つ前の
+    /// パフェは組めたとみなさない(TST の後)。並べ方は盤面から決める(同じ局面では同じ値)。
+    ///
+    /// 【2026-11-11・ユーザー「2巡目でもソフトドロップしないのが好ましい。パフェができる確率が高いものを用いたい」】
+    /// 探索が図どおりの手から選ぶ時に使う(search.rs の `template_allowed`)。
+    #[allow(clippy::too_many_arguments)]
+    pub fn continue_rate(
+        self: &Arc<Self>,
+        board: &Board,
+        queue: &[Piece],
+        hold: Option<Piece>,
+        bag: &[Piece],
+        rules: &Rules,
+        samples: u32,
+        hard: bool,
+        need_tsd: bool,
+    ) -> f32 {
+        let mut rng = board.cols.iter().fold(0x2545_F491_4F6C_DD1Du64, |a, &c| (a ^ c).wrapping_mul(0x9E37_79B9_7F4A_7C15)) | 1;
+        let mut shuffled = |items: &[Piece]| {
+            let mut v = items.to_vec();
+            for i in (1..v.len()).rev() {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                v.swap(i, (rng % (i as u64 + 1)) as usize);
+            }
+            v
+        };
+        let mut ok = 0;
+        // 標本どうしで、置き方の使い回しと「置き続けられない局面」を分け合う(残りのミノも含めて覚えるので混ざらない)
+        let mut memo = WalkMemo::default();
+        for _ in 0..samples {
+            let mut seq = queue.to_vec();
+            seq.extend(shuffled(bag));
+            seq.extend(shuffled(&Piece::ALL));
+            seq.truncate(queue.len() + continue_lookahead());
+            ok += walk(self, *board, &seq, hold, rules, hard, need_tsd, &mut memo) as u32;
+        }
+        ok as f32 / samples.max(1) as f32
+    }
+
     /// 見えているミノに、袋の残り(`bag`。NEXT の後で今の袋に残っているミノ)も足して、1巡目をソフトドロップなしで組めるか。
     /// 袋の残りが2〜3個で来る順が分からない時は、どの順でも組めること。4個以上か空(次は新しい袋)なら見えているミノだけで見る。
     ///
@@ -405,12 +468,138 @@ impl Template {
     }
 }
 
+/// `walk` が使い回す、盤面とミノごとの置き方(同じ盤面を何度も通るので)。
+type MoveCache = HashMap<(Board, Piece), Rc<Vec<tetrisai_core::Move>>>;
+
+/// `walk` の作業用(置き続けられないと分かった局面と、置き方の使い回し)。
+#[derive(Default)]
+struct WalkMemo {
+    /// 置き続けられないと分かった局面(盤面・HOLD・残りのミノ・撃った回数)
+    dead: HashSet<(Board, Option<Piece>, Vec<Piece>, u32, bool)>,
+    moves: MoveCache,
+}
+
+impl Template {
+    /// 盤面 `board` に `piece` を図どおりに置けるマス(4マスを並べたもの)。`accepts` をまとめて調べる形。
+    fn targets(&self, board: &Board, piece: Piece) -> Vec<[(i8, i8); 4]> {
+        let mut out: Vec<[(i8, i8); 4]> = Vec::new();
+        for f in self.forms.iter().filter(|f| f.consistent(board)) {
+            for (i, &(p, cells)) in f.items.iter().enumerate() {
+                if p != piece || out.contains(&cells) {
+                    continue;
+                }
+                if cells.iter().any(|&(x, y)| board.cols[x as usize] >> y & 1 == 1) {
+                    continue;
+                }
+                if f.gaps.get(i).is_some_and(|&g| g != 0) {
+                    continue;
+                }
+                if f.last.contains(&i) {
+                    let others = bits(
+                        f.items
+                            .iter()
+                            .enumerate()
+                            .filter(|(j, _)| !f.last.contains(j) && f.gaps.get(*j).is_none_or(|&g| g == 0))
+                            .flat_map(|(_, (_, c))| c.iter().copied()),
+                    );
+                    if !subset(&others, &board.cols) {
+                        continue;
+                    }
+                }
+                out.push(cells);
+            }
+        }
+        out
+    }
+}
+
+/// `Template::continue_rate` の1通りのミノ順を、深さ優先で図どおりに置き続けられるか。
+#[allow(clippy::too_many_arguments)]
+fn walk(
+    t: &Arc<Template>,
+    board: Board,
+    queue: &[Piece],
+    hold: Option<Piece>,
+    rules: &Rules,
+    hard: bool,
+    need_tsd: bool,
+    memo: &mut WalkMemo,
+) -> bool {
+    let Some((&current, rest)) = queue.split_first() else { return true }; // 分かっているミノはすべて置けた
+    let key = (board, hold, queue.to_vec(), t.clears, need_tsd);
+    if memo.dead.contains(&key) {
+        return false;
+    }
+    let mut options = vec![(current, rest, hold)];
+    match hold {
+        Some(h) if h != current => options.push((h, rest, Some(current))),
+        None => {
+            if let Some((&next, rest2)) = rest.split_first() {
+                if next != current {
+                    options.push((next, rest2, Some(current)));
+                }
+            }
+        }
+        _ => {}
+    }
+    let filled: u32 = board.cols.iter().map(|c| c.count_ones()).sum();
+    for (piece, rest, hold) in options {
+        let targets = t.targets(&board, piece);
+        // パフェになりうるのは、置いた後のマスの数が10の倍数の時だけ
+        let maybe_pc = (filled + 4).is_multiple_of(10);
+        if targets.is_empty() && piece != Piece::T && !maybe_pc {
+            continue;
+        }
+        let moves = memo.moves.entry((board, piece)).or_insert_with(|| Rc::new(generate(&board, piece, rules.spawn()))).clone();
+        // 1巡目(まだ撃っておらず盤面が28マスに満たない間)は、`hard` でなくても T 以外のソフトドロップを使わない(探索の
+        // 1巡目の縛り `first_stage_soft` と同じ)。【2026-11-11・実機 debug_log_20261111_210217 の9局目】これが無いと、1巡目に
+        // ソフトドロップが要る道筋を「置き続けられる」と数えて選び、次の手で縛りの手が無くなってテンプレが崩れた
+        let first_stage = t.clears == 0 && filled < 28;
+        for m in moves.iter() {
+            if (hard || first_stage) && piece != Piece::T && m.soft_drop_sections > 0 {
+                continue;
+            }
+            let on_form = targets.contains(&m.placement.location.sorted_cells());
+            if !on_form && piece != Piece::T && !maybe_pc {
+                continue;
+            }
+            let mut s = PlayerState::new(board);
+            let r = s.apply(&m.placement, rules);
+            // 図に無くても Tスピンダブル以上とパフェは撃てる(探索と同じ)
+            let shot = r.perfect_clear || (r.spin == Spin::Full && r.lines >= 2);
+            if !shot && !on_form {
+                continue;
+            }
+            let tsd = r.spin == Spin::Full && r.lines >= 2;
+            // TST の後、TSD を撃たずにパフェにする道筋は組めたとみなさない
+            if r.perfect_clear {
+                if need_tsd && !tsd {
+                    continue;
+                }
+                return true;
+            }
+            let need_tsd = need_tsd && !tsd;
+            match t.follow(&s.board, r.lines) {
+                Some(next) => {
+                    if walk(&next, s.board, rest, hold, rules, hard, need_tsd, memo) {
+                        return true;
+                    }
+                }
+                // 撃った後にテンプレが終わった(図の想定より先へ進んだ)
+                None if r.lines > 0 && shot && !need_tsd => return true,
+                None => {}
+            }
+        }
+    }
+    memo.dead.insert(key);
+    false
+}
+
 /// 図 `form` を、ミノ順 `queue`(先頭が操作ミノ)と HOLD で置き続けられるか(深さ優先)。
 fn build(form: &Form, board: Board, queue: &[Piece], hold: Option<Piece>, rules: &Rules, hard_only: bool) -> bool {
     if subset(&form.cells, &board.cols) {
         return true; // 図を組み終えた
     }
-    let Some((&current, rest)) = queue.split_first() else { return true }; // 見えているミノはすべて置けた
     let place = |piece: Piece, rest: &[Piece], hold: Option<Piece>| {
         generate(&board, piece, rules.spawn()).iter().any(|m| {
             (!hard_only || m.soft_drop_sections == 0) && form.accepts(&board, &m.placement.location) && {
@@ -419,6 +608,12 @@ fn build(form: &Form, board: Board, queue: &[Piece], hold: Option<Piece>, rules:
                 b.full_lines() == 0 && build(form, b, rest, hold, rules, hard_only)
             }
         })
+    };
+    // 見えているミノはすべて置けた。HOLD に残したミノも、図を組み終えていなければ今の盤面に置けること
+    // 【2026-11-11・実機 debug_log_20261111_210217 の9局目(くろみつ砲、S T I Z L O J)】以前は HOLD に1巡目のミノ(I)を残したまま
+    // 「組める」とみなし、最後に I をハードドロップで入れられずに図から外れた
+    let Some((&current, rest)) = queue.split_first() else {
+        return hold.is_none_or(|h| place(h, &[], None));
     };
     if place(current, rest, hold) {
         return true;
@@ -725,18 +920,20 @@ impl OpeningTracker {
             _ => {}
         }
         // 【2026-11-07・ユーザー】はちみつ砲 → 迷走砲(Iミノが左側)の順に、1巡目をソフトドロップなしで組めれば狙う
+        // 【2026-11-11】パフェまで届く割合の順に、くろみつ砲 → はちみつ砲 → 迷走砲
         // 【2026-11-11・ユーザー】袋の残りも足して、1巡目の7個すべてをソフトドロップなしで置けるものだけ
         let hard = |t: &&Arc<Template>| t.buildable_hard_drop_known(&root.queue, root.hold, &root.bag, rules);
         if let Some(t) = priority_templates().iter().find(hard) {
             self.state = State::Template(t.clone());
             return;
         }
-        // どちらも組めなければ、ほかのTDテンプレか、テンプレを狙わない(素の状態)を均等に選ぶ
+        // どれも組めなければ、ほかのTDテンプレを `OTHER_ORDER` の順に、1巡目をソフトドロップなしで組めれば狙う。どれも組めなければ
+        // テンプレを狙わない(素の状態)
         // 【2026-11-11・ユーザー「TDテンプレの中で1巡目にソフトドロップが不要になるものを選ぶ」】ほかのテンプレも同じ条件
-        let candidates: Vec<&Arc<Template>> = td_templates().iter().filter(hard).collect();
-        let i = (self.next_random() % (candidates.len() as u64 + 1)) as usize;
-        if let Some(t) = candidates.get(i) {
-            self.state = State::Template((*t).clone());
+        // 【2026-11-11・ユーザー「パフェができる確率が高いものを用いたい」】以前は、ほかのテンプレか素の状態を均等に選んでいて、
+        // 組めるテンプレがあっても素の状態を選ぶことがあった(対戦シミュレーターで3%の局)
+        if let Some(t) = OTHER_ORDER.iter().filter_map(|name| td_templates().iter().find(|t| t.name == *name)).find(hard) {
+            self.state = State::Template(t.clone());
         }
     }
 
@@ -828,9 +1025,9 @@ mod tests {
     #[test]
     fn priority_templates_in_order() {
         let names: Vec<&str> = priority_templates().iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, ["はちみつ砲", "迷走砲"]);
+        assert_eq!(names, ["くろみつ砲", "はちみつ砲", "迷走砲"]);
         // 迷走砲の1巡目の図は Iミノが左端のものだけ
-        let meisou = &priority_templates()[1];
+        let meisou = &priority_templates()[2];
         let first: Vec<&Form> = meisou.forms.iter().filter(|f| f.is_first()).collect();
         assert!(!first.is_empty());
         for form in first {
@@ -843,7 +1040,7 @@ mod tests {
     fn 撃つtは印が無くても最後に置く() {
         // 【2026-11-08・実機 debug_log_20261108_202040 の1P 局3】はちみつ砲の2巡目の図には「最後に置く」印が無いものがあり、
         // TST の溝へ T を先に入れる手(1列消し)を図の手として受け付けていた
-        let honey = &priority_templates()[0];
+        let honey = &priority_templates()[1];
         // 実機で崩した図(1巡目の図0の後の2巡目)と同じ並び: TST の行に Z などのマスがある
         let second: Vec<&Form> = honey.forms.iter().filter(|f| f.section == "理想形 > 2巡目" && !f.last.is_empty()).collect();
         assert_eq!(second.len(), 12, "理想形の2巡目で T が1つの図はすべて");
@@ -869,15 +1066,54 @@ mod tests {
     }
 
     #[test]
-    fn honey_is_chosen_first_when_buildable_by_hard_drop() {
+    fn priority_template_is_chosen_in_order_when_buildable_by_hard_drop() {
         use Piece::*;
         let rules = Rules::ppt2();
-        let queue = vec![I, O, Z, T, L, S, J];
-        assert!(priority_templates()[0].buildable_hard_drop(&queue, None, &rules));
-        let root = Root { queue, ..Root::default() };
-        let mut tracker = OpeningTracker::with_mode(1, OpeningMode::Td);
-        tracker.choose(&root, &rules);
-        assert_eq!(tracker.template_name(), Some("はちみつ砲"));
+        // 7種の並びのいくつかで、1巡目をソフトドロップなしで組める優先テンプレのうち先のものを選ぶ
+        for order in [[I, O, Z, T, L, S, J], [S, T, I, Z, L, O, J], [J, T, I, S, O, Z, L], [L, Z, S, J, I, O, T]] {
+            let expected = priority_templates()
+                .iter()
+                .find(|t| t.buildable_hard_drop_known(&order[..6], None, &order[6..], &rules))
+                .map(|t| t.name.as_str());
+            let root = Root { queue: order[..6].to_vec(), bag: order[6..].to_vec(), ..Root::default() };
+            let mut tracker = OpeningTracker::with_mode(1, OpeningMode::Td);
+            tracker.choose(&root, &rules);
+            if expected.is_some() {
+                assert_eq!(tracker.template_name(), expected, "{order:?}");
+            }
+        }
+        // S T I Z L O J ではくろみつ砲を組めない(I を HOLD に残したまま最後に入れられない。実機 debug_log_20261111_210217 の9局目)
+        let kuro = &priority_templates()[0];
+        assert_eq!(kuro.name, "くろみつ砲");
+        assert!(!kuro.buildable_hard_drop_known(&[S, T, I, Z, L, O], None, &[J], &rules));
+    }
+
+    #[test]
+    fn 先のミノまで図どおりに置き続けられる割合() {
+        use Piece::*;
+        let rules = Rules::ppt2();
+        let honey = &priority_templates()[1];
+        // はちみつ砲を組める並び: 先のミノを足しても置き続けられる見込みがある
+        let ok = honey.continue_rate(&Board::default(), &[I, O, Z, T, L, S, J], None, &[], &rules, 8, false, false);
+        assert!(ok > 0.0, "{ok}");
+        // 同じ盤面・同じミノなら同じ値(並べ方は盤面から決める)
+        assert_eq!(ok, honey.continue_rate(&Board::default(), &[I, O, Z, T, L, S, J], None, &[], &rules, 8, false, false));
+        // O を続けて置く図は無い
+        let none = honey.continue_rate(&Board::default(), &[O, O, O, O, O], None, &[], &rules, 8, false, false);
+        assert_eq!(none, 0.0);
+    }
+
+    #[test]
+    fn tstの後はtsdを飛ばすパフェを組めたとみなさない() {
+        use Piece::*;
+        let rules = Rules::ppt2();
+        // はちみつ砲で TST を撃った後の盤面(対戦シミュレーターの種 2)。図には、TSD の溝を T 以外で埋めてパフェにする図もある
+        let board = Board::from_rows(&["......####", "..##..####", "####...###", "#####.####"]);
+        let t = priority_templates()[1].follow(&board, 3).expect("TST の後も図に従う");
+        // I O S J Z L T の順では、T を最後まで使わずにパフェにする道筋しか無い(T は TSD の溝に入らない)
+        let queue = [I, O, S, J, Z, L, T];
+        assert!(walk(&t, board, &queue, None, &rules, false, false, &mut WalkMemo::default()));
+        assert!(!walk(&t, board, &queue, None, &rules, false, true, &mut WalkMemo::default()), "TSD を撃つ前のパフェは数えない");
     }
 
     #[test]
@@ -895,9 +1131,9 @@ mod tests {
     }
 
     #[test]
-    fn td系テンプレ5種を読める() {
+    fn ほかのtd系テンプレ4種を読める() {
         let names: Vec<&str> = td_templates().iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, ["ホットケーキ積み", "くろみつ砲", "PC-Spin", "皐月積み", "ベーカリーTD"]);
+        assert_eq!(names, ["ホットケーキ積み", "PC-Spin", "皐月積み", "ベーカリーTD"]);
         for t in td_templates() {
             assert!(t.forms.iter().any(|f| f.is_first()), "{} に1巡目の図が無い", t.name);
             assert!(t.forms.iter().any(|f| !f.last.is_empty()), "{} に Tスピンの図が無い", t.name);
@@ -996,7 +1232,7 @@ mod tests {
 
     /// 図の一番下にあるミノを図の位置に置いた盤面と、そのテンプレ(はちみつ砲)。
     fn honey_with_one_piece() -> (Arc<Template>, Board) {
-        let honey = priority_templates()[0].clone();
+        let honey = priority_templates()[1].clone();
         let first = honey.forms.iter().find(|f| f.is_first()).unwrap();
         let (_, cells) = *first.items.iter().find(|(_, c)| c.iter().any(|&(_, y)| y == 0)).unwrap();
         let mut board = Board::default();
@@ -1028,7 +1264,7 @@ mod tests {
     #[test]
     fn 消した回数の上限までは続ける() {
         // 3巡目の図の始まりの盤面(TST の後)
-        let honey = priority_templates()[0].clone();
+        let honey = priority_templates()[1].clone();
         let form = honey.forms.iter().find(|f| f.section.contains("3巡目")).unwrap();
         let mut board = Board::default();
         for x in 0..WIDTH {
@@ -1047,13 +1283,12 @@ mod tests {
         // 2026-11-11: J T I S O Z の後に L が来ると、はちみつ砲の1巡目は L でソフトドロップが要る(見えている6個だけなら組める)
         use Piece::*;
         let rules = Rules::ppt2();
-        let honey = &priority_templates()[0];
+        let honey = &priority_templates()[1];
         assert_eq!(honey.name, "はちみつ砲");
         let queue = [J, T, I, S, O, Z];
-        assert!(honey.buildable_hard_drop(&queue, None, &rules));
         assert!(!honey.buildable_hard_drop_known(&queue, None, &[L], &rules));
-        // 袋の残りが空(次は新しい袋)なら見えている分だけで見る
-        assert!(honey.buildable_hard_drop_known(&queue, None, &[], &rules));
+        // 7個目が L 以外(I O Z T L S J の並び)なら組める
+        assert!(honey.buildable_hard_drop_known(&[I, O, Z, T, L, S], None, &[J], &rules));
         // 開幕で選ぶ時も、はちみつ砲にはしない
         let mut tracker = OpeningTracker::with_mode(1, OpeningMode::Td);
         let root = Root { queue: queue.to_vec(), bag: vec![L], ..Root::default() };
@@ -1110,7 +1345,7 @@ mod tests {
     fn tsdで消えた後もパフェまで図に従う() {
         // 【2026-11-08・ユーザー「TST→TSD→パフェで21段せり上げ」】はちみつ砲の3巡目(パフェ狙い)の図: T を入れて TSD で
         // 下の2行を消した後、消えた行を図から取り除いた位置に残りのミノを置くと、盤面が空になる(パフェ)
-        let honey = priority_templates()[0].clone();
+        let honey = priority_templates()[1].clone();
         let form = honey
             .forms
             .iter()

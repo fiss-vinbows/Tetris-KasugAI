@@ -331,34 +331,29 @@ pub fn search(
             // 【2026-11-08・ユーザー「はちみつ砲の2巡目を早々にあきらめた。序盤なので組み切って」】テンプレの間は、
             // 実際に置く手(根の手)に図どおりの手が1つでもあれば、図に無い手を選ばない(加点だけだと、評価の高い別の手で
             // 図から外れた: debug_log_20261108_192000 の1P 局4・2P 局6)
-            // 縛るのは最初の消去(TST)まで。消えた後も縛ると TST→TSD が減った(対戦シミュレーター: 43% → 39%)
-            let template_only = match (&root.opening, depth, parent.on_template) {
-                (Opening::Template(t), 0, 1) if !weights.template_bonus_only => options_here[..count].iter().any(|&(piece, hold, next)| {
-                    generate_safe(&parent.state.board, piece, spawn, weights.spawn_margin, &mut moves);
-                    moves.iter().any(|mv| {
-                        t.accepts(&parent.state.board, &mv.placement.location)
-                            && !first_stage_soft(1, &parent.state.board, mv)
-                            && first_stage_continues(t, root, &parent.state.board, mv, hold, next, rules)
-                    })
-                }),
-                _ => false,
+            // 【2026-11-11】図どおりの手が複数あれば、見えていない先のミノまで試して図どおりに置き続けられる見込みの高い手に絞り
+            // (`template_allowed`)、縛るのもテンプレの終わり(TST の後の TSD・パフェ)までにした(`template_restricted`)
+            let allowed: Vec<tetrisai_core::Placement> = match (&root.opening, depth) {
+                (Opening::Template(t), 0) if !weights.template_bonus_only && template_restricted(parent.on_template) => {
+                    template_allowed(t, root, &parent.state.board, &options_here[..count], spawn, weights.spawn_margin, rules)
+                }
+                _ => Vec::new(),
             };
+            let template_only = !allowed.is_empty();
             for &(piece, hold, next) in &options_here[..count] {
                 generate_safe(&parent.state.board, piece, spawn, weights.spawn_margin, &mut moves);
                 for mv in &moves {
                     if mv.placement.location.cells().iter().all(|&(_, y)| y >= LOCK_OUT_Y) {
                         continue;
                     }
-                    let off_template = template_only
-                        && !matches!(&root.opening, Opening::Template(t)
-                            if t.accepts(&parent.state.board, &mv.placement.location)
-                                && !first_stage_soft(parent.on_template, &parent.state.board, mv)
-                                && first_stage_continues(t, root, &parent.state.board, mv, hold, next, rules));
+                    let off_template = template_only && !allowed.contains(&mv.placement);
                     let mut state = parent.state;
                     let result = state.apply(&mv.placement, rules);
                     // 図に無くても、Tスピンダブル以上とパフェは撃てる(消えた後の図と撃ち方がずれると、撃つ手が図に無い手に
                     // なる。縛るだけだと TST→TSD が 43% → 29%、TST→TSD→パフェが 21% → 15% に減った: 対戦シミュレーター)
-                    if off_template && !(result.perfect_clear || (result.spin == tetrisai_core::Spin::Full && result.lines >= 2)) {
+                    // 【2026-11-11】TST の後は、図に無いパフェで TSD を飛ばさない(`tsd_pending`)
+                    let pc_ok = result.perfect_clear && !matches!(&root.opening, Opening::Template(t) if tsd_pending(t));
+                    if off_template && !(pc_ok || (result.spin == tetrisai_core::Spin::Full && result.lines >= 2)) {
                         continue;
                     }
                     let mut r = parent.reward
@@ -615,7 +610,7 @@ mod tests {
         // 【2026-11-08・ユーザー「はちみつ砲の2巡目を早々にあきらめた。序盤なので組み切って」】
         // テンプレの加点を 0 にしても(評価がほかの手を好んでも)、根の手は図どおりの手から選ぶ
         let rules = Rules::ppt2();
-        let honey = crate::opening::priority_templates()[0].clone();
+        let honey = crate::opening::priority_templates()[1].clone();
         let queue = [Piece::I, Piece::O, Piece::L, Piece::S, Piece::Z, Piece::T];
         assert!(honey.buildable_hard_drop(&queue, None, &rules));
         let mut weights = Weights::default();
@@ -739,6 +734,125 @@ mod tests {
         root.push_piece(Piece::T);
         assert_eq!(root.bag.len(), 6);
     }
+}
+
+/// 根の手を図どおりの手に絞る段階か(`on_template` は 1 + 撃った回数)。
+/// 【2026-11-08】以前は最初の消去(TST)まで(消えた後も縛ると TST→TSD が 43% → 39% に減った)。それは後のミノの置き場を
+/// 見ずに縛っていたためで、先のミノまで試して選ぶ(`template_allowed`)ようにしてからは、テンプレの終わりまで縛る方が
+/// TSD・パフェまで届く(2026-11-11、`td_solo_probe`)。環境変数 TD_RESTRICT_CLEARS(比べる時用)で何回撃つまで縛るかを変えられる。
+fn template_restricted(on_template: u8) -> bool {
+    static LIMIT: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    let limit = *LIMIT.get_or_init(|| std::env::var("TD_RESTRICT_CLEARS").ok().and_then(|s| s.parse().ok()).unwrap_or(crate::opening::TEMPLATE_CLEARS as u8));
+    (1..=limit).contains(&on_template)
+}
+
+/// テンプレの間に根で選んでよい手(空なら縛らない)。
+/// 図どおりの手(1巡目は T 以外のソフトドロップなしで、置いた後もソフトドロップなしで1巡目を組み続けられる手)が複数あれば、
+/// 見えているミノ(と袋の残り)の後に見えていない先のミノをランダムに足した `continue_samples` 通りで、図どおりに置き続けられる
+/// 割合を試し、「置き続けられる割合 + `hard_bonus` × T 以外をハードドロップだけで置き続けられる割合」が一番高い手に絞る。
+///
+/// 【2026-11-11・ユーザー「TDテンプレについてさらに最適化を追究したい。2巡目でもソフトドロップしないのが好ましい。
+/// パフェができる確率が高いものを用いたい」】以前は今のミノを図に置けるかしか見ず、HOLD の使い方を誤って後のミノの置き場が
+/// 無くなりテンプレが終わっていた(ミノ順を全部知っていれば 皐月積みは TSD まで 92% 届くのに、探索では 4%)。
+fn template_allowed(
+    t: &std::sync::Arc<crate::opening::Template>,
+    root: &Root,
+    board: &Board,
+    options: &[(Piece, Option<Piece>, usize)],
+    spawn: tetrisai_core::Spawn,
+    spawn_margin: u32,
+    rules: &Rules,
+) -> Vec<tetrisai_core::Placement> {
+    let mut moves = Vec::with_capacity(64);
+    // (手, 置いた後の HOLD, 次の位置)
+    let mut accepted: Vec<(tetrisai_core::Move, Option<Piece>, usize)> = Vec::new();
+    for &(piece, hold, next) in options {
+        generate_safe(board, piece, spawn, spawn_margin, &mut moves);
+        for mv in &moves {
+            // 1巡目(盤面が28マスに満たない間)は T 以外のソフトドロップを使わない(どの段階でも)
+            if t.accepts(board, &mv.placement.location) && !first_stage_soft(1 + t.clears as u8, board, mv) {
+                accepted.push((*mv, hold, next));
+            }
+        }
+    }
+    let cells: u32 = board.cols.iter().map(|c| c.count_ones()).sum();
+    // 1巡目は、置いた後もソフトドロップなしで1巡目を組み続けられる手だけ(無ければ縛らない)
+    if t.clears == 0 && cells < 24 {
+        accepted.retain(|(mv, hold, next)| first_stage_continues(t, root, board, mv, *hold, *next, rules));
+        if accepted.is_empty() {
+            return Vec::new();
+        }
+    }
+    let samples = continue_samples();
+    if accepted.len() <= 1 || samples == 0 {
+        return accepted.iter().map(|(mv, ..)| mv.placement).collect();
+    }
+    // bot は同じ局面を幅を広げながら読み直すので、直前と同じ局面なら前の結果を使う
+    type Key = (Board, Vec<Piece>, Option<Piece>, Vec<Piece>, String, u32, u32);
+    thread_local! {
+        static LAST: std::cell::RefCell<Option<(Key, Vec<tetrisai_core::Placement>)>> = const { std::cell::RefCell::new(None) };
+    }
+    let key: Key = (*board, root.queue.clone(), root.hold, root.bag.clone(), t.name.clone(), t.clears, t.rise);
+    if let Some(hit) = LAST.with(|l| l.borrow().as_ref().filter(|(k, _)| *k == key).map(|(_, v)| v.clone())) {
+        return hit;
+    }
+    // 候補が複数あれば、見えていない先のミノまで試した割合で点数を付け、一番高い手だけにする
+    let rate = |mv: &tetrisai_core::Move, hold: Option<Piece>, next: usize, hard: bool| {
+        let mut s = tetrisai_core::PlayerState::new(*board);
+        let r = s.apply(&mv.placement, rules);
+        let tsd = r.spin == tetrisai_core::Spin::Full && r.lines >= 2;
+        // TST を撃った後(1回撃った後)は、TSD を撃つまでのパフェを組めたとみなさない
+        let need_tsd = (t.clears == 0 && r.spin == tetrisai_core::Spin::Full && r.lines == 3) || (tsd_pending(t) && !tsd);
+        if r.perfect_clear {
+            return if tsd_pending(t) && !tsd { 0.0 } else { 1.0 };
+        }
+        match t.follow(&s.board, r.lines) {
+            Some(nt) => {
+                nt.continue_rate(&s.board, root.queue.get(next..).unwrap_or(&[]), hold, &root.bag, rules, samples, hard, need_tsd)
+            }
+            None => 0.0,
+        }
+    };
+    let bonus = hard_bonus();
+    let scores: Vec<f32> = accepted
+        .iter()
+        .map(|(mv, hold, next)| {
+            let is_hard = mv.placement.location.piece == Piece::T || mv.soft_drop_sections == 0;
+            let h = if is_hard && bonus > 0.0 { rate(mv, *hold, *next, true) } else { 0.0 };
+            rate(mv, *hold, *next, false) + bonus * h
+        })
+        .collect();
+    let best = scores.iter().copied().fold(f32::MIN, f32::max);
+    let chosen: Vec<tetrisai_core::Placement> =
+        accepted.iter().zip(&scores).filter(|&(_, &sc)| sc >= best - 1e-6).map(|((mv, ..), _)| mv.placement).collect();
+    LAST.with(|l| *l.borrow_mut() = Some((key, chosen.clone())));
+    chosen
+}
+
+/// テンプレで TST を撃った後、TSD をまだ撃っていないか(1回だけ撃った後とみなす)。この間は TSD を撃たずにパフェにする
+/// 道筋を選ばない(`template_allowed` の点数で 0、図に無いパフェも撃たない)。TSD の道筋が見込めない時(点数がすべて 0)だけ
+/// TST→パフェになりうる。
+///
+/// 【2026-11-11・ユーザー「止める方法を調べて」(TSD を飛ばすパフェ)】実機 debug_log_20261111_204212 の10局中3局と、1人で
+/// 組ませた時の 14〜45% が、TST の後に TSD を撃たずパフェになっていた(TST 6行 + パフェ 10行。TSD の約5行が抜ける)。
+/// TBA の図に、TSD の溝を T 以外のミノで埋めて行を消す「3巡目 - パフェ狙い」の図(はちみつ砲など)があり、探索はパフェを高く
+/// 見るのでその図を選んでいた。
+fn tsd_pending(t: &crate::opening::Template) -> bool {
+    t.clears == 1
+}
+
+/// 点数の、T 以外をハードドロップで置き続けられる割合の重み(環境変数 TD_HARD_BONUS で変えられる。比べる時用)。
+/// 【2026-11-11】`td_solo_probe`(1人で300局)で 0・0.3・1 を比べ、パフェまで届く割合は誤差の範囲で、0.3 は 0 より2巡目に
+/// ソフトドロップを使う局が減った(はちみつ砲 49%→33%、迷走砲 39%→28%)。1 は 0.3 と差なし
+fn hard_bonus() -> f32 {
+    static B: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *B.get_or_init(|| std::env::var("TD_HARD_BONUS").ok().and_then(|s| s.parse().ok()).unwrap_or(0.3))
+}
+
+/// `template_allowed` で先のミノを試す数(環境変数 TD_SAMPLES で変えられる。比べる時用)。
+fn continue_samples() -> u32 {
+    static N: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *N.get_or_init(|| std::env::var("TD_SAMPLES").ok().and_then(|s| s.parse().ok()).unwrap_or(8))
 }
 
 /// テンプレの1巡目(まだ1回も消しておらず、盤面が7個分の28マスに満たない)の手で、ソフトドロップを使う手か(T は除く)。
