@@ -313,6 +313,7 @@ fn pieces(text: &str) -> Vec<Piece> {
 
 /// テンプレを選んだら、5種どれでも、読み筋の手がすべて図どおり(図のマスへ図と同じミノを置く)になる。
 /// ミノ順は、見えている7個すべてを図どおりに置けるものを選ぶ。
+/// 【2026-11-11】1巡目のソフトドロップの手は図どおりとみなさないので、ソフトドロップなしで組めるミノ順を選ぶ
 #[test]
 fn テンプレを選ぶと図どおりに組む() {
     use tetrisai_engine::opening::td_templates;
@@ -322,8 +323,8 @@ fn テンプレを選ぶと図どおりに組む() {
         let queue = queues
             .iter()
             .map(|q| pieces(q))
-            .find(|q| template.buildable(q, None, &rules))
-            .unwrap_or_else(|| panic!("{} を組めるミノ順が無い", template.name));
+            .find(|q| template.buildable_hard_drop(q, None, &rules))
+            .unwrap_or_else(|| panic!("{} をソフトドロップなしで組めるミノ順が無い", template.name));
         let root = Root { queue: queue.clone(), opening: Opening::Template(template.clone()), ..Default::default() };
         let options = SearchOptions { width: 256, max_depth: 6, speculate: false };
         let r = search(&root, &options, &run8_weights(), &rules, &|| false).unwrap();

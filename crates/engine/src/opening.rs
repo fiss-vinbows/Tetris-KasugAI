@@ -374,6 +374,35 @@ impl Template {
     pub fn buildable_hard_drop(&self, queue: &[Piece], hold: Option<Piece>, rules: &Rules) -> bool {
         self.forms.iter().filter(|f| f.is_first()).any(|f| build(f, Board::default(), queue, hold, rules, true))
     }
+
+    /// 盤面 `board` から、分かっているミノ(`queue` の後に袋の残り `bag`)で、1巡目の図をソフトドロップなしで組み続けられるか
+    /// (`buildable_hard_drop_known` と同じ数え方。盤面が図の途中でなければ false)。
+    /// 【2026-11-11】1巡目の間は、置いた後もソフトドロップなしで組み続けられる手だけを図どおりとみなす(探索が使う)。
+    pub fn continues_hard_drop(&self, board: &Board, queue: &[Piece], hold: Option<Piece>, bag: &[Piece], rules: &Rules) -> bool {
+        let orders = if bag.is_empty() || bag.len() > 3 { vec![Vec::new()] } else { permutations(bag) };
+        orders.iter().all(|order| {
+            let mut known = queue.to_vec();
+            known.extend_from_slice(order);
+            self.forms.iter().filter(|f| f.is_first() && f.consistent(board)).any(|f| build(f, *board, &known, hold, rules, true))
+        })
+    }
+
+    /// 見えているミノに、袋の残り(`bag`。NEXT の後で今の袋に残っているミノ)も足して、1巡目をソフトドロップなしで組めるか。
+    /// 袋の残りが2〜3個で来る順が分からない時は、どの順でも組めること。4個以上か空(次は新しい袋)なら見えているミノだけで見る。
+    ///
+    /// 【2026-11-11・ユーザー「開幕で迷走砲を選んだ時、1巡目にソフトドロップを伴うことがある。ソフトドロップになってしまう場合は
+    /// 採用しないようにしたい。はちみつ砲も同様。TDテンプレの中で1巡目にソフトドロップが不要になるものを選ぶ」】開幕では NEXT の後の
+    /// 袋の残りは1個なので、1巡目の7個がすべて分かる。以前は見えている6個だけで確かめ、7個目でソフトドロップが要る並びでも選んでいた。
+    pub fn buildable_hard_drop_known(&self, queue: &[Piece], hold: Option<Piece>, bag: &[Piece], rules: &Rules) -> bool {
+        if bag.is_empty() || bag.len() > 3 {
+            return self.buildable_hard_drop(queue, hold, rules);
+        }
+        permutations(bag).iter().all(|order| {
+            let mut known = queue.to_vec();
+            known.extend_from_slice(order);
+            self.buildable_hard_drop(&known, hold, rules)
+        })
+    }
 }
 
 /// 図 `form` を、ミノ順 `queue`(先頭が操作ミノ)と HOLD で置き続けられるか(深さ優先)。
@@ -696,13 +725,15 @@ impl OpeningTracker {
             _ => {}
         }
         // 【2026-11-07・ユーザー】はちみつ砲 → 迷走砲(Iミノが左側)の順に、1巡目をソフトドロップなしで組めれば狙う
-        if let Some(t) = priority_templates().iter().find(|t| t.buildable_hard_drop(&root.queue, root.hold, rules)) {
+        // 【2026-11-11・ユーザー】袋の残りも足して、1巡目の7個すべてをソフトドロップなしで置けるものだけ
+        let hard = |t: &&Arc<Template>| t.buildable_hard_drop_known(&root.queue, root.hold, &root.bag, rules);
+        if let Some(t) = priority_templates().iter().find(hard) {
             self.state = State::Template(t.clone());
             return;
         }
         // どちらも組めなければ、ほかのTDテンプレか、テンプレを狙わない(素の状態)を均等に選ぶ
-        let candidates: Vec<&Arc<Template>> =
-            td_templates().iter().filter(|t| t.buildable(&root.queue, root.hold, rules)).collect();
+        // 【2026-11-11・ユーザー「TDテンプレの中で1巡目にソフトドロップが不要になるものを選ぶ」】ほかのテンプレも同じ条件
+        let candidates: Vec<&Arc<Template>> = td_templates().iter().filter(hard).collect();
         let i = (self.next_random() % (candidates.len() as u64 + 1)) as usize;
         if let Some(t) = candidates.get(i) {
             self.state = State::Template((*t).clone());
@@ -752,6 +783,23 @@ impl OpeningTracker {
             _ => None,
         }
     }
+}
+
+/// 並べ替えをすべて。
+fn permutations(items: &[Piece]) -> Vec<Vec<Piece>> {
+    if items.len() <= 1 {
+        return vec![items.to_vec()];
+    }
+    let mut out = Vec::new();
+    for i in 0..items.len() {
+        let mut rest = items.to_vec();
+        let first = rest.remove(i);
+        for mut p in permutations(&rest) {
+            p.insert(0, first);
+            out.push(p);
+        }
+    }
+    out
 }
 
 /// `items` から `k` 個を選ぶ組み合わせ(昇順のまま)。
@@ -992,6 +1040,25 @@ mod tests {
             assert_eq!(t.clears, n);
         }
         assert!(t.follow(&board, 1).is_none(), "上限で終わる");
+    }
+
+    #[test]
+    fn 袋の残りも足して1巡目をソフトドロップなしで組めるか見る() {
+        // 2026-11-11: J T I S O Z の後に L が来ると、はちみつ砲の1巡目は L でソフトドロップが要る(見えている6個だけなら組める)
+        use Piece::*;
+        let rules = Rules::ppt2();
+        let honey = &priority_templates()[0];
+        assert_eq!(honey.name, "はちみつ砲");
+        let queue = [J, T, I, S, O, Z];
+        assert!(honey.buildable_hard_drop(&queue, None, &rules));
+        assert!(!honey.buildable_hard_drop_known(&queue, None, &[L], &rules));
+        // 袋の残りが空(次は新しい袋)なら見えている分だけで見る
+        assert!(honey.buildable_hard_drop_known(&queue, None, &[], &rules));
+        // 開幕で選ぶ時も、はちみつ砲にはしない
+        let mut tracker = OpeningTracker::with_mode(1, OpeningMode::Td);
+        let root = Root { queue: queue.to_vec(), bag: vec![L], ..Root::default() };
+        tracker.observe(&root, &rules);
+        assert_ne!(tracker.template_name(), Some("はちみつ砲"));
     }
 
     #[test]

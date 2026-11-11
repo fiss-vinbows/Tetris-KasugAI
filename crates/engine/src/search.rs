@@ -333,9 +333,13 @@ pub fn search(
             // 図から外れた: debug_log_20261108_192000 の1P 局4・2P 局6)
             // 縛るのは最初の消去(TST)まで。消えた後も縛ると TST→TSD が減った(対戦シミュレーター: 43% → 39%)
             let template_only = match (&root.opening, depth, parent.on_template) {
-                (Opening::Template(t), 0, 1) if !weights.template_bonus_only => options_here[..count].iter().any(|&(piece, _, _)| {
+                (Opening::Template(t), 0, 1) if !weights.template_bonus_only => options_here[..count].iter().any(|&(piece, hold, next)| {
                     generate_safe(&parent.state.board, piece, spawn, weights.spawn_margin, &mut moves);
-                    moves.iter().any(|mv| t.accepts(&parent.state.board, &mv.placement.location))
+                    moves.iter().any(|mv| {
+                        t.accepts(&parent.state.board, &mv.placement.location)
+                            && !first_stage_soft(1, &parent.state.board, mv)
+                            && first_stage_continues(t, root, &parent.state.board, mv, hold, next, rules)
+                    })
                 }),
                 _ => false,
             };
@@ -346,7 +350,10 @@ pub fn search(
                         continue;
                     }
                     let off_template = template_only
-                        && !matches!(&root.opening, Opening::Template(t) if t.accepts(&parent.state.board, &mv.placement.location));
+                        && !matches!(&root.opening, Opening::Template(t)
+                            if t.accepts(&parent.state.board, &mv.placement.location)
+                                && !first_stage_soft(parent.on_template, &parent.state.board, mv)
+                                && first_stage_continues(t, root, &parent.state.board, mv, hold, next, rules));
                     let mut state = parent.state;
                     let result = state.apply(&mv.placement, rules);
                     // 図に無くても、Tスピンダブル以上とパフェは撃てる(消えた後の図と撃ち方がずれると、撃つ手が図に無い手に
@@ -372,7 +379,7 @@ pub fn search(
                     // (読みの中では消えた行を図から取り除かないので、消した後の加点は次に局面を受け取ってから)
                     let mut on_template = 0;
                     if let (1.., Opening::Template(t)) = (parent.on_template, &root.opening) {
-                        if t.accepts(&parent.state.board, &mv.placement.location) {
+                        if t.accepts(&parent.state.board, &mv.placement.location) && !first_stage_soft(parent.on_template, &parent.state.board, mv) {
                             r += weights.template_piece;
                             on_template = if result.lines == 0 {
                                 parent.on_template
@@ -732,4 +739,35 @@ mod tests {
         root.push_piece(Piece::T);
         assert_eq!(root.bag.len(), 6);
     }
+}
+
+/// テンプレの1巡目(まだ1回も消しておらず、盤面が7個分の28マスに満たない)の手で、ソフトドロップを使う手か(T は除く)。
+/// 図どおりとみなさない。
+/// 【2026-11-11・ユーザー「TDテンプレの中で1巡目にソフトドロップが不要になるものを選ぶ」】図のマスへの置き方でも、置く順によっては
+/// 張り出しの下へソフトドロップで入れることになる。ハードドロップで入る順で組む。2巡目(TST の形を作る所)は差し込みが要る図が
+/// あるので縛らない(縛ると TST まで届く割合が 81% → 63% に下がった)。
+fn first_stage_soft(on_template: u8, board: &Board, mv: &tetrisai_core::Move) -> bool {
+    let cells: u32 = board.cols.iter().map(|c| c.count_ones()).sum();
+    on_template == 1 && cells < 28 && mv.soft_drop_sections > 0 && mv.placement.location.piece != Piece::T
+}
+
+/// テンプレの1巡目(盤面が28マスに満たない)の根の手で、置いた後も分かっているミノ(NEXT と袋の残り)でソフトドロップなしに
+/// 組み続けられるか(1巡目でなければ true)。選ぶ時に確かめた「ソフトドロップなしで組める順」に沿って置くため(2026-11-11)。
+/// これが無いと、今のミノはハードドロップで置けても後のミノで差し込みが要る順に入り、図から外れた(TST まで 81% → 71%)。
+fn first_stage_continues(
+    t: &crate::opening::Template,
+    root: &Root,
+    board: &Board,
+    mv: &tetrisai_core::Move,
+    hold: Option<Piece>,
+    next: usize,
+    rules: &Rules,
+) -> bool {
+    let cells: u32 = board.cols.iter().map(|c| c.count_ones()).sum();
+    if t.clears > 0 || cells >= 24 {
+        return true; // 1巡目の最後の1個か、1巡目の後
+    }
+    let mut after = *board;
+    after.place(&mv.placement.location);
+    t.continues_hard_drop(&after, root.queue.get(next..).unwrap_or(&[]), hold, &root.bag, rules)
 }
