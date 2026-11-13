@@ -71,6 +71,20 @@ fn play(t: &Arc<Template>, seq: &[Piece], weights: &Weights, rules: &Rules) -> O
         SEARCH_US.fetch_add(us, Ordering::Relaxed);
         SEARCH_MAX_US.fetch_max(us, Ordering::Relaxed);
         SEARCHES.fetch_add(1, Ordering::Relaxed);
+        // SOLO_SLOW_MS: これより遅かった探索の局面を出す(遅い所を探す用)
+        if std::env::var("SOLO_SLOW_MS").ok().and_then(|v| v.parse::<u64>().ok()).is_some_and(|ms| us > ms * 1000) {
+            eprintln!(
+                "遅い探索 {}ms {n}手目 撃った{} 図{} 次{:?} HOLD{:?}
+  {}",
+                us / 1000,
+                tmpl.clears,
+                tmpl.forms.len(),
+                root.queue,
+                root.hold,
+                root.state.board.to_rows().join("
+  ")
+            );
+        }
         let Some(c) = found.as_ref().and_then(|r| r.candidates.first()) else { break };
         if c.mv.soft_drop_sections > 0 && c.mv.placement.location.piece != Piece::T {
             out.soft[(n / 7).min(2) as usize] += 1;
@@ -136,7 +150,7 @@ fn play(t: &Arc<Template>, seq: &[Piece], weights: &Weights, rules: &Rules) -> O
             }
         }
         match tmpl.follow(&root.state.board, res.lines) {
-            Some(next) => tmpl = next,
+            Some(next) => tmpl = next.narrowed(&root.state.board), // 実機(OpeningTracker)と同じく図を絞る
             None => {
                 if debug() {
                     eprintln!(
@@ -242,4 +256,5 @@ fn main() {
         SEARCH_US.load(Ordering::Relaxed) as f64 / n as f64 / 1000.0,
         SEARCH_MAX_US.load(Ordering::Relaxed) as f64 / 1000.0
     );
+    println!("先のミノまで試す1通りで調べた局面の最大 {}", tetrisai_engine::opening::WALK_NODES_MAX.load(Ordering::Relaxed));
 }

@@ -69,12 +69,17 @@ pub struct Template {
     pub clears: u32,
     /// せり上がりで図を上にずらした段数
     pub rise: u32,
+    /// TST の後、TSD を撃たずにパフェ(TST→パフェ)を狙うテンプレか(データの `pc_after_tst`。2026-11-13、DESIGN.md 8.14)。
+    /// 偽なら TST の後は TSD を撃つまでのパフェを組めたとみなさない(search.rs の `tsd_pending`)
+    pub pc_after_tst: bool,
 }
 
 #[derive(Deserialize)]
 struct RawTemplate {
     name: String,
     forms: Vec<RawForm>,
+    #[serde(default)]
+    pc_after_tst: bool,
 }
 
 #[derive(Deserialize)]
@@ -113,17 +118,29 @@ const EXCLUDED_TEMPLATES: [&str; 1] = ["タンドリーチキン積み"];
 /// 【2026-11-11・実機 debug_log_20261111_210217 の9局目】1巡目を組めるかの判定(`build`)が HOLD に残したミノを見ておらず、
 /// くろみつ砲を組めない並びでも選んでいた。直すと、くろみつ砲は 75% の並びで組めて、組めば TST 100%・TST→TSD→パフェ 54.0%
 /// (はちみつ砲 42.5%・迷走砲 34.0%)なので、くろみつ砲を先にした(全体の TST→TSD→パフェ 46.1% → 49.6%、1人で1000局)。
-const PRIORITY_TEMPLATES: [&str; 3] = ["くろみつ砲", "はちみつ砲", "迷走砲"];
+/// 【2026-11-13・DESIGN.md 8.14 段階2b】土台から自動で探した「自動探索TD-A」(`data/td_generated.json`)を、くろみつ砲を組めない
+/// 並び(5%ほど)の次の候補にした。くろみつ砲を組める並びではすべて組めて1人の TST→TSD→パフェもほぼ同じだが、先に選ぶと
+/// 開幕C4W 相手の勝率が 21.7% → 20.2% に下がった(6000局。TSD を飛ばすパフェの逃げ道がほぼ無いため。開幕TSD 相手は 35.3% → 38.8%)。
+const PRIORITY_TEMPLATES: [&str; 4] = ["くろみつ砲", "自動探索TD-A", "はちみつ砲", "迷走砲"];
 
 /// 優先テンプレがどれも組めない時に狙う順(2026-11-11)。1人で組ませた時(`td_solo_probe`、1000局)の TST→TSD→パフェは
 /// PC-Spin 31.4%・ベーカリーTD 28.3%・ホットケーキ積み 26.9%・皐月積み 12.0%。
 const OTHER_ORDER: [&str; 4] = ["PC-Spin", "ベーカリーTD", "ホットケーキ積み", "皐月積み"];
 
-/// ほかの TD系テンプレ4種(`EXCLUDED_TEMPLATES` と `PRIORITY_TEMPLATES` は除く)。
+/// 優先して狙うテンプレの名前(優先度の順)。環境変数 TD_PRIORITY(','区切り)で入れ替えられる(比べる時用)
+fn priority_names() -> &'static [String] {
+    static NAMES: OnceLock<Vec<String>> = OnceLock::new();
+    NAMES.get_or_init(|| match std::env::var("TD_PRIORITY") {
+        Ok(list) => list.split(',').map(str::to_string).collect(),
+        Err(_) => PRIORITY_TEMPLATES.iter().map(|s| s.to_string()).collect(),
+    })
+}
+
+/// ほかの TD系テンプレ(`EXCLUDED_TEMPLATES` と優先テンプレは除く)。
 pub fn td_templates() -> &'static [Arc<Template>] {
     static TEMPLATES: OnceLock<Vec<Arc<Template>>> = OnceLock::new();
     TEMPLATES.get_or_init(|| {
-        all_templates().iter().filter(|t| !PRIORITY_TEMPLATES.contains(&t.name.as_str())).cloned().collect()
+        all_templates().iter().filter(|t| !priority_names().contains(&t.name)).cloned().collect()
     })
 }
 
@@ -131,7 +148,7 @@ pub fn td_templates() -> &'static [Arc<Template>] {
 pub fn priority_templates() -> &'static [Arc<Template>] {
     static TEMPLATES: OnceLock<Vec<Arc<Template>>> = OnceLock::new();
     TEMPLATES.get_or_init(|| {
-        PRIORITY_TEMPLATES
+        priority_names()
             .iter()
             .filter_map(|name| all_templates().iter().find(|t| t.name == *name).cloned())
             .collect()
@@ -142,8 +159,12 @@ pub fn priority_templates() -> &'static [Arc<Template>] {
 fn all_templates() -> &'static [Arc<Template>] {
     static TEMPLATES: OnceLock<Vec<Arc<Template>>> = OnceLock::new();
     TEMPLATES.get_or_init(|| {
-        let raw: Vec<RawTemplate> =
+        let mut raw: Vec<RawTemplate> =
             serde_json::from_str(include_str!("../data/td_templates.json")).expect("td_templates.json を読めない");
+        // 自動で探して作ったテンプレ(`examples/td_gen.rs`、DESIGN.md 8.14。TBA の図には無く、全自動だけで使う)
+        let generated: Vec<RawTemplate> =
+            serde_json::from_str(include_str!("../data/td_generated.json")).expect("td_generated.json を読めない");
+        raw.extend(generated);
         raw.into_iter()
             .filter(|t| !EXCLUDED_TEMPLATES.contains(&t.name.as_str()))
             .map(|t| {
@@ -177,7 +198,7 @@ fn all_templates() -> &'static [Arc<Template>] {
                         })
                     })
                     .collect();
-                Arc::new(Template { name: t.name, forms, clears: 0, rise: 0 })
+                Arc::new(Template { name: t.name, forms, clears: 0, rise: 0, pc_after_tst: t.pc_after_tst })
             })
             .collect()
     })
@@ -330,12 +351,20 @@ impl Template {
             if self.clears + 1 >= TEMPLATE_CLEARS {
                 return None;
             }
-            let mut forms: Vec<Form> = all_templates()
-                .iter()
-                .find(|t| t.name == self.name)
-                .map_or(Vec::new(), |t| t.forms.iter().map(|f| if self.rise > 0 { f.shifted(self.rise) } else { f.clone() }).collect());
-            // 消した後の盤面から始まる図(1巡目の図は空の盤面から始まるので使わない)
-            forms.retain(|f| !f.is_first() && f.consistent(board));
+            // 消した後の盤面から始まる図(1巡目の図は空の盤面から始まるので使わない)。
+            // 【2026-11-13】合う図だけを複製する(図の多いテンプレで、すべて複製してから絞ると先読みが重かった)
+            let mut forms: Vec<Form> = all_templates().iter().find(|t| t.name == self.name).map_or(Vec::new(), |t| {
+                t.forms
+                    .iter()
+                    .filter_map(|f| {
+                        if self.rise > 0 {
+                            Some(f.shifted(self.rise)).filter(|s| !s.is_first() && s.consistent(board))
+                        } else {
+                            (!f.is_first() && f.consistent(board)).then(|| f.clone())
+                        }
+                    })
+                    .collect()
+            });
             for f in &self.forms {
                 let full = f.full_rows();
                 for rows in combinations(&full, lines as usize) {
@@ -345,7 +374,13 @@ impl Template {
                     }
                 }
             }
-            Arc::new(Template { name: self.name.clone(), forms, clears: self.clears + 1, rise: self.rise })
+            Arc::new(Template {
+                name: self.name.clone(),
+                forms,
+                clears: self.clears + 1,
+                rise: self.rise,
+                pc_after_tst: self.pc_after_tst,
+            })
         } else {
             self.clone()
         };
@@ -365,12 +400,32 @@ impl Template {
                 forms: base.forms.iter().map(|f| f.shifted(rows)).collect(),
                 clears: base.clears,
                 rise: base.rise + rows,
+                pc_after_tst: base.pc_after_tst,
             };
             if shifted.consistent(board) {
                 return Some(Arc::new(shifted));
             }
         }
         None
+    }
+
+    /// 盤面 `board` の後も図どおりに戻れない図(図の外にブロックがある図。ラインを消すまで合わない)を除いたテンプレ。
+    /// 除くものが無ければそのまま。ラインを消した後の図は `follow` が図のデータから作り直すので、除いても困らない。
+    ///
+    /// 【2026-11-13】図の多いテンプレ(自動探索TD-D は8千個)では、探索の中で図をすべて調べる所(`accepts`・`targets`)が
+    /// 重い。実際に1手置くたび(`OpeningTracker`)に絞る。
+    pub fn narrowed(self: &Arc<Self>, board: &Board) -> Arc<Template> {
+        let fits = |f: &Form| board.cols.iter().zip(f.existing.iter().zip(&f.cells)).all(|(&c, (&e, &x))| c & !(e | x | f.floor) == 0);
+        if self.forms.iter().all(fits) {
+            return self.clone();
+        }
+        Arc::new(Template {
+            name: self.name.clone(),
+            forms: self.forms.iter().filter(|f| fits(f)).cloned().collect(),
+            clears: self.clears,
+            rise: self.rise,
+            pc_after_tst: self.pc_after_tst,
+        })
     }
 
     /// 盤面がこのテンプレのどれかの図の途中か。
@@ -445,7 +500,9 @@ impl Template {
             seq.extend(shuffled(bag));
             seq.extend(shuffled(&Piece::ALL));
             seq.truncate(queue.len() + continue_lookahead());
+            memo.nodes = 0;
             ok += walk(self, *board, &seq, hold, rules, hard, need_tsd, &mut memo) as u32;
+            WALK_NODES_MAX.fetch_max(memo.nodes, std::sync::atomic::Ordering::Relaxed);
         }
         ok as f32 / samples.max(1) as f32
     }
@@ -471,13 +528,27 @@ impl Template {
 /// `walk` が使い回す、盤面とミノごとの置き方(同じ盤面を何度も通るので)。
 type MoveCache = HashMap<(Board, Piece), Rc<Vec<tetrisai_core::Move>>>;
 
+/// `walk` が使い回す、テンプレ(Arc の番地)・盤面・ミノごとの図どおりの置き場所。
+type TargetCache = HashMap<(usize, Board, Piece), Rc<Vec<[(i8, i8); 4]>>>;
+
 /// `walk` の作業用(置き続けられないと分かった局面と、置き方の使い回し)。
 #[derive(Default)]
 struct WalkMemo {
     /// 置き続けられないと分かった局面(盤面・HOLD・残りのミノ・撃った回数)
     dead: HashSet<(Board, Option<Piece>, Vec<Piece>, u32, bool)>,
     moves: MoveCache,
+    /// テンプレ(Arc の番地)・盤面・ミノごとの図どおりの置き場所。【2026-11-13】図の多いテンプレ(自動探索TD-D は8千個)で、
+    /// 同じ局面を通るたびに図をすべて調べ直して探索1回が平均 0.6 秒・最大 34 秒かかったので覚えておく
+    targets: TargetCache,
+    /// テンプレ(Arc の番地)・消した後の盤面・消した行数ごとの続くテンプレ(`follow`。消した後は図を作り直すので重い)。
+    /// 続くテンプレをここで持っておくので、番地は使い終わるまで変わらない
+    follows: HashMap<(usize, Board, u32), Option<Arc<Template>>>,
+    /// 今の1通りのミノ順で調べた局面の数(`WALK_NODES_MAX` 用)
+    nodes: u32,
 }
+
+/// これまでに1通りのミノ順で `walk` が調べた局面の数の最大(調べる用)
+pub static WALK_NODES_MAX: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 impl Template {
     /// 盤面 `board` に `piece` を図どおりに置けるマス(4マスを並べたもの)。`accepts` をまとめて調べる形。
@@ -530,6 +601,7 @@ fn walk(
     if memo.dead.contains(&key) {
         return false;
     }
+    memo.nodes += 1;
     let mut options = vec![(current, rest, hold)];
     match hold {
         Some(h) if h != current => options.push((h, rest, Some(current))),
@@ -543,8 +615,9 @@ fn walk(
         _ => {}
     }
     let filled: u32 = board.cols.iter().map(|c| c.count_ones()).sum();
+    let tkey = Arc::as_ptr(t) as usize;
     for (piece, rest, hold) in options {
-        let targets = t.targets(&board, piece);
+        let targets = memo.targets.entry((tkey, board, piece)).or_insert_with(|| Rc::new(t.targets(&board, piece))).clone();
         // パフェになりうるのは、置いた後のマスの数が10の倍数の時だけ
         let maybe_pc = (filled + 4).is_multiple_of(10);
         if targets.is_empty() && piece != Piece::T && !maybe_pc {
@@ -579,7 +652,8 @@ fn walk(
                 return true;
             }
             let need_tsd = need_tsd && !tsd;
-            match t.follow(&s.board, r.lines) {
+            let next = memo.follows.entry((tkey, s.board, r.lines)).or_insert_with(|| t.follow(&s.board, r.lines)).clone();
+            match next {
                 Some(next) => {
                     if walk(&next, s.board, rest, hold, rules, hard, need_tsd, memo) {
                         return true;
@@ -870,7 +944,7 @@ impl OpeningTracker {
                             self.attacked = true;
                         }
                         // 攻撃された後は TSD まで(2回消すまで)でテンプレを終え、C4W に移る(パフェはせり上がりで組めない)
-                        if self.attacked_well && self.attacked && next.clears >= 2 { State::Done } else { State::Template(next) }
+                        if self.attacked_well && self.attacked && next.clears >= 2 { State::Done } else { State::Template(next.narrowed(&board)) }
                     }
                     None => State::Done,
                 },
@@ -1022,12 +1096,17 @@ fn count(board: &Board) -> u32 {
 mod tests {
     use super::*;
 
+    /// 優先テンプレを名前で
+    fn tpl(name: &str) -> &'static Arc<Template> {
+        priority_templates().iter().find(|t| t.name == name).expect("優先テンプレに無い")
+    }
+
     #[test]
     fn priority_templates_in_order() {
         let names: Vec<&str> = priority_templates().iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, ["くろみつ砲", "はちみつ砲", "迷走砲"]);
+        assert_eq!(names, ["くろみつ砲", "自動探索TD-A", "はちみつ砲", "迷走砲"]);
         // 迷走砲の1巡目の図は Iミノが左端のものだけ
-        let meisou = &priority_templates()[2];
+        let meisou = &tpl("迷走砲");
         let first: Vec<&Form> = meisou.forms.iter().filter(|f| f.is_first()).collect();
         assert!(!first.is_empty());
         for form in first {
@@ -1040,7 +1119,7 @@ mod tests {
     fn 撃つtは印が無くても最後に置く() {
         // 【2026-11-08・実機 debug_log_20261108_202040 の1P 局3】はちみつ砲の2巡目の図には「最後に置く」印が無いものがあり、
         // TST の溝へ T を先に入れる手(1列消し)を図の手として受け付けていた
-        let honey = &priority_templates()[1];
+        let honey = &tpl("はちみつ砲");
         // 実機で崩した図(1巡目の図0の後の2巡目)と同じ並び: TST の行に Z などのマスがある
         let second: Vec<&Form> = honey.forms.iter().filter(|f| f.section == "理想形 > 2巡目" && !f.last.is_empty()).collect();
         assert_eq!(second.len(), 12, "理想形の2巡目で T が1つの図はすべて");
@@ -1083,7 +1162,7 @@ mod tests {
             }
         }
         // S T I Z L O J ではくろみつ砲を組めない(I を HOLD に残したまま最後に入れられない。実機 debug_log_20261111_210217 の9局目)
-        let kuro = &priority_templates()[0];
+        let kuro = &tpl("くろみつ砲");
         assert_eq!(kuro.name, "くろみつ砲");
         assert!(!kuro.buildable_hard_drop_known(&[S, T, I, Z, L, O], None, &[J], &rules));
     }
@@ -1092,7 +1171,7 @@ mod tests {
     fn 先のミノまで図どおりに置き続けられる割合() {
         use Piece::*;
         let rules = Rules::ppt2();
-        let honey = &priority_templates()[1];
+        let honey = &tpl("はちみつ砲");
         // はちみつ砲を組める並び: 先のミノを足しても置き続けられる見込みがある
         let ok = honey.continue_rate(&Board::default(), &[I, O, Z, T, L, S, J], None, &[], &rules, 8, false, false);
         assert!(ok > 0.0, "{ok}");
@@ -1109,7 +1188,7 @@ mod tests {
         let rules = Rules::ppt2();
         // はちみつ砲で TST を撃った後の盤面(対戦シミュレーターの種 2)。図には、TSD の溝を T 以外で埋めてパフェにする図もある
         let board = Board::from_rows(&["......####", "..##..####", "####...###", "#####.####"]);
-        let t = priority_templates()[1].follow(&board, 3).expect("TST の後も図に従う");
+        let t = tpl("はちみつ砲").follow(&board, 3).expect("TST の後も図に従う");
         // I O S J Z L T の順では、T を最後まで使わずにパフェにする道筋しか無い(T は TSD の溝に入らない)
         let queue = [I, O, S, J, Z, L, T];
         assert!(walk(&t, board, &queue, None, &rules, false, false, &mut WalkMemo::default()));
@@ -1232,7 +1311,7 @@ mod tests {
 
     /// 図の一番下にあるミノを図の位置に置いた盤面と、そのテンプレ(はちみつ砲)。
     fn honey_with_one_piece() -> (Arc<Template>, Board) {
-        let honey = priority_templates()[1].clone();
+        let honey = tpl("はちみつ砲").clone();
         let first = honey.forms.iter().find(|f| f.is_first()).unwrap();
         let (_, cells) = *first.items.iter().find(|(_, c)| c.iter().any(|&(_, y)| y == 0)).unwrap();
         let mut board = Board::default();
@@ -1264,7 +1343,7 @@ mod tests {
     #[test]
     fn 消した回数の上限までは続ける() {
         // 3巡目の図の始まりの盤面(TST の後)
-        let honey = priority_templates()[1].clone();
+        let honey = tpl("はちみつ砲").clone();
         let form = honey.forms.iter().find(|f| f.section.contains("3巡目")).unwrap();
         let mut board = Board::default();
         for x in 0..WIDTH {
@@ -1283,7 +1362,7 @@ mod tests {
         // 2026-11-11: J T I S O Z の後に L が来ると、はちみつ砲の1巡目は L でソフトドロップが要る(見えている6個だけなら組める)
         use Piece::*;
         let rules = Rules::ppt2();
-        let honey = &priority_templates()[1];
+        let honey = &tpl("はちみつ砲");
         assert_eq!(honey.name, "はちみつ砲");
         let queue = [J, T, I, S, O, Z];
         assert!(!honey.buildable_hard_drop_known(&queue, None, &[L], &rules));
@@ -1345,7 +1424,7 @@ mod tests {
     fn tsdで消えた後もパフェまで図に従う() {
         // 【2026-11-08・ユーザー「TST→TSD→パフェで21段せり上げ」】はちみつ砲の3巡目(パフェ狙い)の図: T を入れて TSD で
         // 下の2行を消した後、消えた行を図から取り除いた位置に残りのミノを置くと、盤面が空になる(パフェ)
-        let honey = priority_templates()[1].clone();
+        let honey = tpl("はちみつ砲").clone();
         let form = honey
             .forms
             .iter()
@@ -1356,7 +1435,7 @@ mod tests {
         for x in 0..WIDTH {
             board.cols[x] = form.existing[x];
         }
-        let t = Arc::new(Template { name: honey.name.clone(), forms: vec![form.clone()], clears: 1, rise: 0 });
+        let t = Arc::new(Template { name: honey.name.clone(), forms: vec![form.clone()], clears: 1, rise: 0, pc_after_tst: false });
         let (_, tee) = *form.items.iter().find(|i| i.0 == Piece::T).unwrap();
         for (x, y) in tee {
             board.cols[x as usize] |= 1 << y;

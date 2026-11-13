@@ -802,7 +802,7 @@ fn template_allowed(
         let r = s.apply(&mv.placement, rules);
         let tsd = r.spin == tetrisai_core::Spin::Full && r.lines >= 2;
         // TST を撃った後(1回撃った後)は、TSD を撃つまでのパフェを組めたとみなさない
-        let need_tsd = (t.clears == 0 && r.spin == tetrisai_core::Spin::Full && r.lines == 3) || (tsd_pending(t) && !tsd);
+        let need_tsd = !t.pc_after_tst && ((t.clears == 0 && r.spin == tetrisai_core::Spin::Full && r.lines == 3) || (tsd_pending(t) && !tsd));
         if r.perfect_clear {
             return if tsd_pending(t) && !tsd { 0.0 } else { 1.0 };
         }
@@ -837,8 +837,10 @@ fn template_allowed(
 /// 組ませた時の 14〜45% が、TST の後に TSD を撃たずパフェになっていた(TST 6行 + パフェ 10行。TSD の約5行が抜ける)。
 /// TBA の図に、TSD の溝を T 以外のミノで埋めて行を消す「3巡目 - パフェ狙い」の図(はちみつ砲など)があり、探索はパフェを高く
 /// 見るのでその図を選んでいた。
+///
+/// 【2026-11-13】TST→パフェを狙うテンプレ(`Template::pc_after_tst`)は除く。
 fn tsd_pending(t: &crate::opening::Template) -> bool {
-    t.clears == 1
+    t.clears == 1 && !t.pc_after_tst
 }
 
 /// 点数の、T 以外をハードドロップで置き続けられる割合の重み(環境変数 TD_HARD_BONUS で変えられる。比べる時用)。
