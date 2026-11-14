@@ -23,6 +23,9 @@
 //!   --no-opponent          相手の情報を使わずに対戦させる(TBA は相手の盤面をまだ読まないので、実際に使う条件に合わせる)
 //!   --lr <数>              最初の学習率(既定 0.5)
 //!   --c <数>               最初のずらし幅(重みの大きさに対する割合。既定 0.25)
+//!   --vs-cc2 [exe]        +側と−側を、同じミノ列で Cold Clear 2(TBP の bot。1手 --think-ms、既定 100ms)と1局ずつ戦わせて
+//!                          比べる(2026-11-14・ユーザー「Cold Clear 2 相手に勝率を上げたい。7割を目指す」)。exe を省くと
+//!                          ../Tetris/external/cold-clear-2 の release。こちらの開幕は --own-opening(この時の既定 random)
 //!   --seed-offset <数>     ミノ列とずらす向きの乱数をずらす(既定 0)。同じ出発点から別の調整をする時に変える
 //!                          (2026-11-08: 変えずに2回走らせたら、2回目が1回目とほぼ同じ重みになった)
 
@@ -36,7 +39,8 @@ use std::time::{Duration, Instant};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use serde_json::json;
-use tetrisai_arena::agent::EngineAgent;
+use tetrisai_arena::agent::{Agent, EngineAgent};
+use tetrisai_arena::tbp::TbpBot;
 use tetrisai_arena::game::{play_game, GameConfig};
 use tetrisai_core::Rules;
 use tetrisai_engine::{OpeningMode, OpeningTracker, Weights};
@@ -298,10 +302,19 @@ fn main() {
     let vs_openings: Vec<OpeningMode> = get("--vs-opening")
         .map(|s| s.split(',').map(|x| OpeningMode::parse(x).expect("--vs-opening の値")).collect())
         .unwrap_or_default();
-    let own_opening = OpeningMode::parse(&get("--own-opening").unwrap_or_else(|| "no_c4w".to_string())).expect("--own-opening の値");
+    // 【2026-11-14】--vs-cc2: 相手を Cold Clear 2 のプロセスにする(値を省けば既定の場所)
+    let vs_cc2: Option<PathBuf> = args.iter().position(|a| a == "--vs-cc2").map(|i| match args.get(i + 1) {
+        Some(v) if !v.starts_with("--") => PathBuf::from(v),
+        _ => Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../Tetris/external/cold-clear-2/target/release/cold-clear-2.exe"),
+    });
+    if let Some(exe) = &vs_cc2 {
+        assert!(exe.exists(), "Cold Clear 2 の実行ファイルが無い: {}", exe.display());
+    }
+    let own_default = if vs_cc2.is_some() { "random" } else { "no_c4w" };
+    let own_opening = OpeningMode::parse(&get("--own-opening").unwrap_or_else(|| own_default.to_string())).expect("--own-opening の値");
     let config = GameConfig {
         rules: rules.clone(),
-        think: Duration::ZERO,
+        think: if vs_cc2.is_some() { Duration::from_millis(num("--think-ms", 100.0) as u64) } else { Duration::ZERO },
         max_pieces: num("--max-pieces", 300.0) as u32,
         adjudicate: true,
         block_margin: num("--block-margin", 0.0) as u32,
@@ -370,6 +383,27 @@ fn main() {
                     }
                     let seed = first_seed + (g / 2) as u64;
                     let plus_first = g.is_multiple_of(2);
+                    if let Some(exe) = &vs_cc2 {
+                        // 同じミノ列で、+側と−側がそれぞれ Cold Clear 2 と1局ずつ(こちらが先手)
+                        let w = if plus_first { &plus } else { &minus };
+                        let mut own = EngineAgent::new(w.clone(), rules.clone(), width, "own");
+                        own.opening = Some(OpeningTracker::with_mode(seed, own_opening)
+                                .with_after_pc(w.after_pc_seed, w.after_pc_no_rival)
+                                .with_attacked_well(w.td_attacked_well, w.td_attacked_clears)
+                                .with_after_pc_vs_c4w(w.after_pc_vs_c4w_plain)
+                                .with_pc_check(w.td_pc_check));
+                        let mut rival = TbpBot::spawn(exe, &[]).expect("Cold Clear 2 を起動できない");
+                        let result = play_game([&mut own as &mut dyn Agent, &mut rival], seed, &config).expect("Cold Clear 2 との対局に失敗");
+                        let mut t = tally.lock().unwrap();
+                        match (result.winner, plus_first) {
+                            (Some(0), true) => t.0 += 1,
+                            (Some(0), false) => t.1 += 1,
+                            (None, _) => t.2 += 1,
+                            _ => {}
+                        }
+                        t.3 += (result.stats[0].pieces + result.stats[1].pieces) as u64;
+                        continue;
+                    }
                     if let Some(vs) = &vs {
                         // 同じ相手・同じミノ列で +側と−側を1局ずつ
                         let mode = if vs_openings.is_empty() {
