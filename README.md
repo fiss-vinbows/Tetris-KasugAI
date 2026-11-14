@@ -109,7 +109,7 @@ TBA で使うプラグインは [Releases](https://github.com/fiss-vinbows/Tetri
 | `config/weights/` | 評価の重み |
 | `tools/` | Cold Clear 2・TBA との突き合わせなどの道具 |
 | `input/` | TBA のシミュレーターで作った局面の画像(局面テストの元) |
-| `docs/` | [設計書](docs/DESIGN.md)・[引き継ぎ資料](docs/HANDOFF.md) |
+| `docs/` | [設計書](docs/DESIGN.md) |
 
 ## 開発
 
