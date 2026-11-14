@@ -97,6 +97,21 @@ pub fn center_well_rows(board: &Board) -> u32 {
     (0..board.max_height()).filter(|&y| row(board, y) == SIDES).count() as u32
 }
 
+/// 盤面の一番下から続く、9マス埋まった行(おじゃまの形の行)の数。せり上がったおじゃまの段数の目安。
+pub fn garbage_rows(board: &Board) -> u32 {
+    (0..board.max_height()).take_while(|&y| row(board, y).count_ones() == WIDTH as u32 - 1).count() as u32
+}
+
+/// 中あけの、一番下の中あけの行から上へ途切れずに続く行の数(壁が埋まりきっていない行で止める)。REN でつながる行の数。
+///
+/// 【2026-11-14・ユーザー「C4Wを積む際に穴をあけて積み上げたため途中でRENがつながらなくなることがある」】`center_well_rows` は
+/// 穴のある壁の行より上の中あけの行も数えるので、穴をふさいで上に積むと点が増え、REN がその行で切れていた。
+pub fn center_well_rows_connected(board: &Board) -> u32 {
+    let height = board.max_height();
+    let Some(start) = (0..height).find(|&y| row(board, y) == SIDES) else { return 0 };
+    (start..height).take_while(|&y| row(board, y) == SIDES).count() as u32
+}
+
 /// 中あけの種(タネ)のマス数: 中央4列が空いた一番下の行より下にある、中央4列のマスの数。
 ///
 /// 【2026-11-01・ユーザー】中あけ REN は中央4列の底に3マスの種(種3)を置いてから積む。種があると、中あけに
@@ -430,5 +445,30 @@ mod tests {
         let board = Board::from_rows(&rows);
         assert_eq!((spawn_height(&board), spawn_danger(&board), board.max_height()), (1, 1, 16));
         assert_eq!(spawn_height(&Board::from_rows(&["#.........", "##....####"])), 1);
+    }
+
+    #[test]
+    fn 穴のある壁より上の中あけは数えない() {
+        // 【2026-11-14・ユーザー「C4Wを積む際に穴をあけて積み上げたため途中でRENがつながらなくなることがある」】
+        // 実機(debug_log_20261114_164308_2p の局17)の形: 右の壁に穴のある行の上に中あけを積んでいた
+        let mut rows = vec!["###....###"; 2];
+        rows.extend(["###......#", "###.....##"]);
+        rows.extend(vec!["###....###"; 5]);
+        let board = Board::from_rows(&rows);
+        assert_eq!(center_well_rows(&board), 7, "今までの数え方は穴の上も数える");
+        assert_eq!(center_well_rows_connected(&board), 5, "底から途切れずに続く行だけ");
+        assert_eq!(center_well_rows_connected(&Board::from_rows(&["###....###"; 6])), 6);
+        assert_eq!(center_well_rows_connected(&Board::new()), 0);
+    }
+
+    #[test]
+    fn 下から続くおじゃまの行を数える() {
+        let mut rows = vec!["###....###"; 3];
+        rows.extend(vec!["####.#####"; 5]);
+        rows.extend(vec!["#.########"; 3]);
+        assert_eq!(garbage_rows(&Board::from_rows(&rows)), 8);
+        assert_eq!(garbage_rows(&Board::from_rows(&["###....###", "#.########"])), 1);
+        assert_eq!(garbage_rows(&Board::from_rows(&["####.#####", "###....###"])), 0, "一番下がおじゃまでなければ 0");
+        assert_eq!(garbage_rows(&Board::new()), 0);
     }
 }

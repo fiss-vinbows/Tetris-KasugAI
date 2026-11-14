@@ -1,3 +1,24 @@
+# 【2026-11-14・ユーザー「C4Wの条件をせりあがり6段以下としたい」】c4w_max_garbage を 8→7 にした(下から続くおじゃまの行 + 予告が
+# 6段以下の時だけ C4W を目指す)。前の重みは records/c4w_garbage/b2b_before_g7.toml
+# 【2026-11-14・ユーザー「せり上がりが8段以上でC4Wを目指すのはやめてほしい」】c4w_max_garbage = 8(盤面の下から続くおじゃまの
+# 行 + 予告が8段以上なら中あけ(C4W)の評価を使わない。ふだんの重みと [counter])。対 run16(1000局・種 68000、こちら td):
+# seed3 28.4→28.5%・td 54.9→55.7%・tsd 45.1→45.9%(誤差の範囲)。経過は records/c4w_garbage/result.txt、
+# 前の重みは records/c4w_garbage/b2b_before_g8.toml
+# 【2026-11-14・ユーザー「硬直が気になる」「パフェが取れないツモだったのでS→Zで単発消し…やらないようにして」「テトリス消しが
+#  できる状態にもかかわらず掘りREN重視で切り崩す癖がある」「全部まとめて」】ふだんの重みに td_pc_check = true(TSD の後に
+# パフェまで届かなければテンプレを終える)・low_clear = -1.5 / low_clear_height = 8(低い時の小さな消去に減点)・
+# を入れた(soft_drop_section -0.5→-2.0 も比べたが、TSD より掘りを選ぶ局面が戻ったので -0.5 のまま。2026-11-14)。中あけを底から途切れずに続く行だけで数える直しはコード。
+# 対 run16(1000局・種 67000、こちら td): td 56.4→55.7%・seed3 31.7→31.7%・tsd 44.7→44.1%(合計 132.8→131.5、誤差の範囲)。経過は records/fix4/result.txt、前の重みは records/fix4/b2b_before_fix4.toml
+# 【2026-11-14・ユーザー「C4W相手にTDパフェを達成したが勝ち切れないときにTDTDやC4Wを組むのをやめてTSDドネイトやテトリス消しを中心に」
+#  「C4Wにおいて相手より5RENの差…がついていると押し切られるので別な方針で迎撃してください」】
+# after_pc_vs_c4w_plain = true(相手が C4W の局でパフェの後はテンプレも C4W も使わない)と rival_ren_gap = 5(相手の REN が
+# 5多ければ迎え撃つ)を足した。対 run16(1000局・種 66000、こちら td): seed3 26.2→30.2%・td 56.8→56.2%・tsd 43.7→45.7%
+# (合計 126.7→132.1)。パフェの後の切り替えだけで seed3 30.3%、5REN 差だけで 28.1%。経過は records/vs_c4w/result.txt、
+# 前の重みは records/vs_c4w/b2b_before_vs_c4w.toml
+# 【2026-11-14・ユーザー「C4Wを積み込む際、高いところで出っ張りを作ったせいで負けになっている」「高い時はC4Wを組まない」】
+# 盤面の高さ(予告・せり上がりを含む)が 14段を超えたら中あけ(C4W)の評価を使わない(c4w_max_height = 14。ふだんの重みと [counter])。
+# 対 run16(1000局・種 65000、こちら td): td 53.1→56.0%・seed3 27.3→26.8%・tsd 47.0→44.9%(合計 127.4→127.7、誤差の範囲)。
+# 12段は合計 122.2 に下がり、16段は 127.3 で同じだった。経過は records/c4w_height/result.txt、前の重みは records/c4w_height/b2b_before_c4w_height.toml
 # 【2026-11-14・ユーザー「C4W以外の盤面においてTSDのドネイトが出来上がっているが掘りRENで消化する癖がある」「8 にする」】
 # B2B が切れている時、TSD の点(spin_clears[2]=1.43)が掘って穴・高さを減らす盤面の点の差より小さく、T を単発に使って掘り REN を
 # 選んでいた(B2B 中は B2B を切る減点 -8 があるので TSD を選ぶ)。ふだんの重みの spin_clears[2] を 1.43→8 にした([counter] は元のまま)。
@@ -105,6 +126,13 @@ rush_lethal = -0.014150747486079732
 rush_height = -0.020774368817607563
 rush_ren_overflow = -0.003678954982509216
 rush_finish = -0.03055033211906751
+c4w_max_height = 14
+after_pc_vs_c4w_plain = true
+rival_ren_gap = 5
+td_pc_check = true
+low_clear = -1.5
+low_clear_height = 8
+c4w_max_garbage = 7
 
 [counter]
 cell_coveredness = -0.5550093452135721
@@ -179,4 +207,7 @@ rush_ren_overflow = -0.003678954982509216
 rush_finish = -0.03055033211906751
 counter_cancel = 1.5
 counter_sent = -0.3
-
+c4w_max_height = 14
+after_pc_vs_c4w_plain = true
+rival_ren_gap = 5
+c4w_max_garbage = 7

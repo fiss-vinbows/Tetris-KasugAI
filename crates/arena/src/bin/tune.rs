@@ -382,7 +382,9 @@ fn main() {
                         let w = if plus_first { &plus } else { &minus };
                         own.opening = Some(OpeningTracker::with_mode(seed, own_opening)
                                 .with_after_pc(w.after_pc_seed, w.after_pc_no_rival)
-                                .with_attacked_well(w.td_attacked_well, w.td_attacked_clears));
+                                .with_attacked_well(w.td_attacked_well, w.td_attacked_clears)
+                                .with_after_pc_vs_c4w(w.after_pc_vs_c4w_plain)
+                                .with_pc_check(w.td_pc_check));
                         rival.opening = Some(OpeningTracker::with_mode(seed ^ 0x55, mode));
                         let result = play_game([&mut own, &mut rival], seed, &config).expect("同じプロセス内の対局は失敗しない");
                         let mut t = tally.lock().unwrap();

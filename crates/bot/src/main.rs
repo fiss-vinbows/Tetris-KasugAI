@@ -123,6 +123,8 @@ fn main() {
         OpeningTracker::with_mode(seed, mode)
             .with_after_pc(weights.after_pc_seed, weights.after_pc_no_rival)
             .with_attacked_well(weights.td_attacked_well, weights.td_attacked_clears)
+            .with_after_pc_vs_c4w(weights.after_pc_vs_c4w_plain)
+            .with_pc_check(weights.td_pc_check)
     });
     let mut bag_counter = BagCounter::default();
     let observe = |opening: &mut Option<OpeningTracker>, root: &mut Root| {
@@ -137,7 +139,15 @@ fn main() {
     // 【2026-11-14・ユーザー「間に合わない場合は火力をため込んで相殺して迎え撃つ方針を考えたい」】迎え撃ちの重み一式([counter])が
     // あれば、早撃ちの代わりに迎え撃ちにする
     let has_counter = weights.counter.is_some();
-    let ban_rival = |opening: &Option<OpeningTracker>, root: &mut Root| {
+    // 【2026-11-14・ユーザー「C4Wにおいて相手より5RENの差…がついていると押し切られるので別な方針で迎撃してください」】
+    // 相手の REN がこちらより rival_ren_gap 以上多ければ、C4W で張り合わずに迎え撃つ(相手の REN は盤面の変わり方から数える)
+    let rival_ren_gap = weights.rival_ren_gap;
+    let ban_rival = |opening: &Option<OpeningTracker>, root: &mut Root, their_ren: u32| {
+        root.strategy = root.strategy.with_ren_gap(root.state.consecutive_clears, their_ren, rival_ren_gap);
+        // 【2026-11-14・ユーザー「相手が開幕C4Wの時はTDパフェの後は必ず迎撃としたい」】
+        if opening.as_ref().is_some_and(|t| t.force_counter()) {
+            root.strategy = tetrisai_engine::Strategy::Rush;
+        }
         if opening.as_ref().is_some_and(|t| t.bans_c4w()) && root.strategy == tetrisai_engine::Strategy::C4WRival {
             root.strategy = tetrisai_engine::Strategy::Rush;
         }
@@ -146,6 +156,8 @@ fn main() {
     // 【2026-11-03・ユーザー】作戦層: 相手の盤面(battle で受け取る。全自動だけ)を見て、C4W で対抗するか早撃ちするかを選ぶ
     let (c4w_response, pivot_opening_rows) = (weights.c4w_response, weights.pivot_opening_rows);
     let mut strategy = StrategyTracker::default();
+    let mut opponent_ren = tetrisai_engine::OpponentRenTracker::default();
+    let mut their_ren = 0u32;
 
     let bot = Arc::new(Bot { shared: Mutex::new(Shared::default()), wake: Condvar::new(), generation: AtomicU64::new(0) });
     {
@@ -198,7 +210,7 @@ fn main() {
                     if opening.as_ref().is_some_and(|t| t.suppress_rival()) && root.strategy != tetrisai_engine::Strategy::Normal {
                         root.strategy = tetrisai_engine::Strategy::Normal;
                     }
-                    ban_rival(&opening, &mut root);
+                    ban_rival(&opening, &mut root, their_ren);
                     let mut s = bot.shared.lock().unwrap();
                     s.pending_start = root.queue.is_empty();
                     s.root = Some(root);
@@ -249,6 +261,12 @@ fn main() {
                     root.incoming = parse_incoming(&msg["incoming"]);
                     root.gauge = msg["gauge"].as_u64().unwrap_or(0) as u32;
                     root.opponent = parse_opponent(&msg["opponent"]);
+                    if let Some(o) = root.opponent.as_ref() {
+                        their_ren = opponent_ren.observe(&o.board);
+                        if let Some(tracker) = opening.as_mut() {
+                            tracker.note_opponent(&o.board);
+                        }
+                    }
                     root.strategy = strategy
                         .observe(&root.state.board, root.opponent.as_ref().map(|o| &o.board))
                         .forced(c4w_response);
@@ -259,7 +277,7 @@ fn main() {
                     if opening.as_ref().is_some_and(|t| t.suppress_rival()) && root.strategy != tetrisai_engine::Strategy::Normal {
                         root.strategy = tetrisai_engine::Strategy::Normal;
                     }
-                    ban_rival(&opening, root);
+                    ban_rival(&opening, root, their_ren);
                     // 【2026-11-07・ユーザー「相手の C4W になすすべなく負ける」】相手の C4W が育ってきたら序盤を切り上げて対抗する
                     if let (Some(tracker), Some(o)) = (opening.as_mut(), root.opponent.as_ref()) {
                         if tracker.pivot_if_opponent_c4w(&o.board, pivot_opening_rows) {

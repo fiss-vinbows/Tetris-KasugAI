@@ -10,5 +10,5 @@ pub mod strategy;
 
 pub use eval::{BattleContext, EvalContext, Garbage, Weights};
 pub use opening::{split_style, Opening, OpeningChoice, OpeningMode, OpeningTracker};
-pub use strategy::{Strategy, StrategyTracker};
+pub use strategy::{OpponentRenTracker, Strategy, StrategyTracker};
 pub use search::{search, Candidate, IncomingGarbage, Opponent, Root, SearchOptions, SearchResult};

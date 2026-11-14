@@ -203,6 +203,11 @@ impl Agent for EngineAgent {
                 back_to_back: o.state.back_to_back,
             });
             root.strategy = self.strategy.observe(&root.state.board, Some(&o.state.board)).forced(self.weights.c4w_response);
+            // 【2026-11-14】相手の REN がこちらより rival_ren_gap 以上多ければ迎え撃つ(bot と同じ。シミュレーターは相手の REN を正確に知っている)
+            root.strategy = root.strategy.with_ren_gap(root.state.consecutive_clears, o.state.consecutive_clears, self.weights.rival_ren_gap);
+            if let Some(tracker) = self.opening.as_mut() {
+                tracker.note_opponent(&o.state.board);
+            }
             // 【2026-11-10】速攻の相手(テンプレの途中で攻撃された)には、TSD の後 C4W に移る
             if self.opening.as_ref().is_some_and(|t| t.force_rival()) && root.strategy == tetrisai_engine::Strategy::Normal {
                 root.strategy = tetrisai_engine::Strategy::C4WRival;
@@ -212,6 +217,10 @@ impl Agent for EngineAgent {
             }
             // 【2026-11-13】C4W を使わないモードでは、相手の C4W に「早撃ち」で答える(bot と同じ)
             if self.opening.as_ref().is_some_and(|t| t.bans_c4w()) && root.strategy == tetrisai_engine::Strategy::C4WRival {
+                root.strategy = tetrisai_engine::Strategy::Rush;
+            }
+            // 【2026-11-14】相手が C4W の局でパフェまで撃った後は、必ず迎え撃ち(bot と同じ)
+            if self.opening.as_ref().is_some_and(|t| t.force_counter()) {
                 root.strategy = tetrisai_engine::Strategy::Rush;
             }
             // 【2026-11-14】迎え撃ちの重み一式があれば、早撃ちの代わりに迎え撃ち(bot と同じ)

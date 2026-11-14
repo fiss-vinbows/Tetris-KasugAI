@@ -13,6 +13,7 @@
 //! 切り替えには、すぐには戻らない幅を持たせる(同じ判断が `SWITCH_AFTER` 回続いたら切り替える)。
 //! 判断の目安(行数)は暫定。実機の双方全自動で見ながら直す。
 
+use tetrisai_core::board::WIDTH;
 use tetrisai_core::Board;
 
 use crate::shape;
@@ -76,6 +77,15 @@ impl Strategy {
     pub fn avoids_c4w(self) -> bool {
         matches!(self, Strategy::Rush | Strategy::Counter)
     }
+
+    /// 相手の REN(続けて消した回数 `their_ren`)がこちら(`our_ren`)より `gap` 以上多ければ、C4W で張り合わずに早撃ちにする
+    /// (`Weights::rival_ren_gap`。0 なら変えない。迎え撃ちの重みがあれば、この後の `with_counter` で迎え撃ちになる)。
+    ///
+    /// 【2026-11-14・ユーザー「C4Wにおいて相手より5RENの差(例えば自分が1REN目の時に相手が6REN目)がついていると押し切られるので
+    /// 別な方針で迎撃してください」】C4W どうしは5REN差で後打ちが負ける(実機の知見)。
+    pub fn with_ren_gap(self, our_ren: u32, their_ren: u32, gap: u32) -> Self {
+        if gap > 0 && their_ren >= our_ren + gap && !self.avoids_c4w() { Strategy::Rush } else { self }
+    }
 }
 
 /// 局面からその場で選ぶ作戦と、その理由(相手の C4W の行数, 自分の C4W の行数)。相手の盤面が無ければ通常。
@@ -88,6 +98,33 @@ pub fn decide(own: &Board, opponent: Option<&Board>) -> (Strategy, u32, u32) {
     }
     let rival = ours >= KEEP_OWN_C4W_ROWS || (ours > 0 && ours + RIVAL_MARGIN >= theirs) || (ours == 0 && own.max_height() <= RIVAL_LOW_HEIGHT && theirs <= 5);
     (if rival { Strategy::C4WRival } else { Strategy::Rush }, theirs, ours)
+}
+
+/// 相手の REN(続けて消した回数)を、受け取った相手の盤面のマスの数の変わり方から数える(bot 用。相手の REN は送られてこない)。
+///
+/// ミノを置いて消さなければマスが4増える(REN が切れる)。消せば `4 - 10 × 消した行数` だけ変わる(REN が続く)。
+/// おじゃまのせり上がりは1行9マスずつ増える(REN は変えない。せり上がりと置いた手が重なれば `9k + 4` で切れる)。
+/// 2手分をまとめて受け取ると数え違えることがあるが、5REN の差を見る目安には足りる。
+#[derive(Clone, Debug, Default)]
+pub struct OpponentRenTracker {
+    last_cells: Option<i32>,
+    ren: u32,
+}
+
+impl OpponentRenTracker {
+    pub fn observe(&mut self, opponent: &Board) -> u32 {
+        let cells = (0..WIDTH).map(|x| opponent.cols[x].count_ones() as i32).sum::<i32>();
+        if let Some(last) = self.last_cells {
+            let d = cells - last;
+            if d < 0 {
+                self.ren += 1;
+            } else if d > 0 && d % 9 != 0 {
+                self.ren = 0;
+            }
+        }
+        self.last_cells = Some(cells);
+        self.ren
+    }
 }
 
 /// 作戦の切り替えを追う(すぐには戻らない幅を持たせる)。bot が局面を受け取るたびに `observe` を呼ぶ。
@@ -166,6 +203,43 @@ mod tests {
         assert_eq!(Strategy::Normal.with_counter(true), Strategy::Normal);
         assert!(Strategy::Counter.avoids_c4w() && Strategy::Rush.avoids_c4w() && !Strategy::C4WRival.avoids_c4w());
         assert_eq!(Strategy::Counter.label(), "迎え撃ち");
+    }
+
+    #[test]
+    fn 相手のrenが5多ければc4wで張り合わない() {
+        // 【2026-11-14・ユーザー「C4Wにおいて相手より5RENの差(例えば自分が1REN目の時に相手が6REN目)がついていると押し切られるので
+        // 別な方針で迎撃してください」】
+        assert_eq!(Strategy::C4WRival.with_ren_gap(1, 6, 5), Strategy::Rush, "5差なら迎え撃つ");
+        assert_eq!(Strategy::C4WRival.with_ren_gap(0, 5, 5), Strategy::Rush, "撃ち始める前に5差でも迎え撃つ");
+        assert_eq!(Strategy::C4WRival.with_ren_gap(2, 6, 5), Strategy::C4WRival, "4差なら張り合う");
+        assert_eq!(Strategy::Normal.with_ren_gap(0, 7, 5), Strategy::Rush, "通常でも相手の長い REN には C4W を組まない");
+        assert_eq!(Strategy::C4WRival.with_ren_gap(0, 9, 0), Strategy::C4WRival, "0 なら使わない");
+        assert_eq!(Strategy::Counter.with_ren_gap(0, 9, 5), Strategy::Counter);
+        assert_eq!(Strategy::C4WRival.with_ren_gap(1, 6, 5).with_counter(true), Strategy::Counter);
+    }
+
+    #[test]
+    fn 相手のrenを盤面の変わり方から数える() {
+        let mut t = OpponentRenTracker::default();
+        let well = |rows: usize| Board::from_rows(&vec!["###....###"; rows]);
+        assert_eq!(t.observe(&well(8)), 0);
+        // 中あけに置いて1行ずつ消す(マスが 4 - 10 = 6 減る)
+        let mut b = well(8);
+        for k in 1..=6 {
+            b = well(8 - k);
+            assert_eq!(t.observe(&b), k as u32);
+        }
+        // おじゃまのせり上がり(1行9マス)では切れない
+        let mut rows = vec!["###....###"; 2];
+        rows.push("####.#####");
+        assert_eq!(t.observe(&Board::from_rows(&rows)), 6);
+        // 消さずに置いたら切れる
+        let mut rows = vec!["###....###"; 2];
+        rows.push("####.#####");
+        rows.insert(0, "###.....##");
+        rows.insert(0, "###.###...");
+        assert_eq!(t.observe(&Board::from_rows(&rows)), 0);
+        let _ = b;
     }
 
     #[test]

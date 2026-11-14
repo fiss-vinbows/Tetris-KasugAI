@@ -110,6 +110,29 @@ pub struct Weights {
     pub tsd_counter: f32,
     /// `tsd_low_fire` で「低い」とみなす高さ
     pub tsd_hold_height: u32,
+    /// 盤面が低い(`low_clear_height` 以下)・予告が無い時の、Tスピンでない1〜3列消し1回あたり(掘り REN・単発の消去)。0 なら使わない。
+    /// 【2026-11-14・ユーザー「たいして火力が出るわけでもないのに掘りRENをしたがる癖があります。盤面が低い時は発火よりも火力を
+    /// 用意することを優先したい」】テトリス・Tスピン・パフェは含めない
+    #[serde(default)]
+    pub low_clear: f32,
+    /// `low_clear` で「低い」とみなす高さ(せり上がりを含む)
+    #[serde(default)]
+    pub low_clear_height: u32,
+    /// 盤面がとても低い(`low_single_height` 以下)・予告が無い時の、Tスピンでない単発消し1回あたり(`low_clear` に足す)。0 なら使わない。
+    /// 【2026-11-14・ユーザー「パフェ後に単発消しを入れているのを修正して」】パフェの後の低い盤面で、TSD の形を作るために単発を挟んでいた
+    #[serde(default)]
+    pub low_single: f32,
+    /// `low_single` で「とても低い」とみなす高さ(せり上がりを含む)
+    #[serde(default)]
+    pub low_single_height: u32,
+    /// 迎え撃ちで、TSD・TST・テトリス(4段前後の攻撃)を撃つのは、予告がこの行数以上ある時だけにする。0 なら使わない。
+    /// 【2026-11-14・ユーザー「C4W迎撃は相手の攻撃火力に合わせて相殺する形が望ましいです。TSDは4段分なので相手のRENが1段攻撃の場合は
+    /// 操作せずに受け入れて攻撃力が上がってから相殺する構想です」】
+    #[serde(default)]
+    pub counter_fire_min: u32,
+    /// `counter_fire_min` より少ない予告で TSD・TST・テトリスを撃つ手の点(ためておく)
+    #[serde(default)]
+    pub counter_fire_early: f32,
     /// 中央4列の底に種3(中央4列の3マス)がある(2026-11-01。左右が埋まる前の、対局の始めにしか作れない。
     /// 中あけの火力はその4〜5手先まで見えないので、種を置いておく価値をここで付ける)
     pub center_well_seed: f32,
@@ -128,6 +151,16 @@ pub struct Weights {
     pub after_pc_seed: bool,
     /// パフェまで撃った後は、その局の終わりまで「C4W で対抗」を使わない(相手が C4W を目指していても、ふつうの作戦)
     pub after_pc_no_rival: bool,
+    /// 相手が C4W の局で、テンプレ(か開幕パフェ)でパフェまで撃った後は、次のテンプレ(TDTD)も C4W も使わず、
+    /// TSD・テトリス中心の素の打ち方にする(その局の終わりまで)。
+    /// 【2026-11-14・ユーザー「C4W相手にTDパフェを達成したが勝ち切れないときにTDTDやC4Wを組むのをやめてTSDドネイトや
+    /// テトリス消しを中心にした方針として」】
+    #[serde(default)]
+    pub after_pc_vs_c4w_plain: bool,
+    /// TSD の後(TST→パフェのテンプレは TST の後)のパフェの段で、見えているミノでパフェまで届く見込みが無ければテンプレを終える。
+    /// 【2026-11-14・ユーザー「パフェが取れないツモだったのでS→Zで単発消しをしているが行動としては極めて弱いのでやらないようにして」】
+    #[serde(default)]
+    pub td_pc_check: bool,
     /// TDテンプレの途中で攻撃されたら(速攻の相手)、T を待ちながら C4W の形も作り、TSD まで撃ったらテンプレを終える
     /// (`OpeningTracker::with_attacked_well`。2026-11-10・ユーザー)
     pub td_attacked_well: bool,
@@ -170,6 +203,15 @@ pub struct Weights {
     /// 穴がある列を高く積まないで。運が良ければせり上がった部分から REN がつながる」】
     #[serde(default)]
     pub garbage_hole_overstack: f32,
+    /// 盤面の高さ(せり上がり・予告を含む)がこれを超えたら、中あけ(C4W)の評価を使わない。0 なら制限しない。
+    /// 【2026-11-14・ユーザー「C4Wを積み込む際、高いところで出っ張りを作ったせいで負けになっている」「高い時はC4Wを組まない」】
+    /// 15〜16段まで積んだ C4W の壁の上や井戸の端に出っ張りを作り、攻撃で押し上げられて負けていた(debug_log_20261114_150809 の1P)
+    #[serde(default)]
+    pub c4w_max_height: u32,
+    /// せり上がったおじゃまの段数(盤面の下から続く9マスの行 + 予告・読みの中でせり上がった分)がこれ以上なら、中あけ(C4W)の評価を
+    /// 使わない。0 なら制限しない。【2026-11-14・ユーザー「せり上がりが8段以上でC4Wを目指すのはやめてほしい」】
+    #[serde(default)]
+    pub c4w_max_garbage: u32,
 
     // ---- 作戦層(2026-11-03。strategy.rs。全自動で相手の情報があるときだけ効く。既定値は0) ----
     /// 「C4W で対抗」のとき、貯めた REN の火力1行あたりに足す点
@@ -180,6 +222,11 @@ pub struct Weights {
     pub rival_early_fire: f32,
     /// `rival_early_fire` を使う高さの上限
     pub rival_fire_height: u32,
+    /// 相手の REN(続けて消した回数)がこちらよりこの数以上多ければ、C4W で張り合わず迎え撃ち(早撃ち)にする。0 なら使わない。
+    /// 【2026-11-14・ユーザー「C4Wにおいて相手より5RENの差(例えば自分が1REN目の時に相手が6REN目)がついていると押し切られるので
+    /// 別な方針で迎撃してください」】
+    #[serde(default)]
+    pub rival_ren_gap: u32,
     /// 「早撃ち」のとき、相手に届く攻撃1行あたりに足す点(C4W は組まない)
     pub rush_attack: f32,
 
@@ -326,6 +373,12 @@ impl Default for Weights {
             tsd_low_fire: 0.0,
             tsd_counter: 0.0,
             tsd_hold_height: 8,
+            low_clear: 0.0,
+            low_clear_height: 0,
+            low_single: 0.0,
+            low_single_height: 0,
+            counter_fire_min: 0,
+            counter_fire_early: 0.0,
             center_well_seed: 0.0,
             ren_potential: 0.0,
             tsd_slot_any: 0.0,
@@ -333,6 +386,8 @@ impl Default for Weights {
             tetris_tsd_flex: 0.0,
             after_pc_seed: false,
             after_pc_no_rival: false,
+            after_pc_vs_c4w_plain: false,
+            td_pc_check: false,
             td_attacked_well: false,
             td_attacked_clears: 1,
             soft_drop_rows: 0.0,
@@ -345,10 +400,13 @@ impl Default for Weights {
             template_bonus_only: false,
             tst_slot_low: 0.0,
             garbage_hole_overstack: -1.5,
+            c4w_max_height: 0,
+            c4w_max_garbage: 0,
             rival_ren: 0.0,
             rival_deficit: 0.0,
             rival_early_fire: 0.0,
             rival_fire_height: 15,
+            rival_ren_gap: 0,
             rush_attack: 0.0,
             c4w_spawn_danger: false,
             rush_pressure: 0.0,
@@ -422,7 +480,11 @@ pub fn evaluate(w: &Weights, rules: &Rules, board: &Board, back_to_back: bool, c
     // 【2026-11-01・ユーザー】いきなり REN を組むのは対策されると弱いので、序盤は中あけの項目を使わない
     // 【2026-11-03・ユーザー】作戦層の「早撃ち」では C4W を組まない
     // 【2026-11-13・ユーザー「C4Wを禁止するモードを設けたい」】C4W を使わないモードでも組まない
-    if !ctx.opening && !ctx.no_c4w && !ctx.strategy.avoids_c4w() {
+    // 【2026-11-14・ユーザー「高い時はC4Wを組まない」】盤面が高い時(c4w_max_height を超えた時)も組まない
+    let too_high = w.c4w_max_height > 0 && board.max_height() + garbage.extra_height > w.c4w_max_height;
+    // 【2026-11-14・ユーザー「せり上がりが8段以上でC4Wを目指すのはやめてほしい」】おじゃまが多くせり上がった時も組まない
+    let too_high = too_high || (w.c4w_max_garbage > 0 && shape::garbage_rows(board) + garbage.extra_height >= w.c4w_max_garbage);
+    if !ctx.opening && !ctx.no_c4w && !ctx.strategy.avoids_c4w() && !too_high {
         e += center_well_value(w, rules, board, ctx);
         if ctx.strategy == Strategy::C4WRival && w.rival_ren != 0.0 {
             e += w.rival_ren * ren_potential(rules, board, ctx.consecutive_clears) as f32;
@@ -513,7 +575,9 @@ pub fn evaluate(w: &Weights, rules: &Rules, board: &Board, back_to_back: bool, c
 fn center_well_value(w: &Weights, rules: &Rules, board: &Board, ctx: &EvalContext) -> f32 {
     let mut e = 0.0;
     if w.center_well_rows != 0.0 || w.center_well_side_diff != 0.0 {
-        let rows = shape::center_well_rows(board);
+        // 【2026-11-14・ユーザー「C4Wを積む際に穴をあけて積み上げたため途中でRENがつながらなくなることがある」】
+        // 穴のある壁の行より上の中あけは REN でつながらないので数えない
+        let rows = shape::center_well_rows_connected(board);
         if rows > 0 {
             e += w.center_well_rows * rows as f32;
             e += w.center_well_side_diff * shape::center_well_side_diff(board) as f32;
@@ -559,6 +623,38 @@ pub fn tsd_fire_value(w: &Weights, result: &ClearResult, height: u32, pending: u
         w.tsd_counter
     } else if result.lines == 2 && height <= w.tsd_hold_height {
         w.tsd_low_fire
+    } else {
+        0.0
+    }
+}
+
+/// 盤面が低い時の小さな消去(Tスピンでない1〜3列消し)の点(`Weights::low_clear`)。`height` は置く前の盤面の高さ
+/// (せり上がった分を含む)、`pending` は置く前の予告の行数。予告がある時(相殺が要る時)は付けない。
+pub fn low_clear_value(w: &Weights, result: &ClearResult, height: u32, pending: u32) -> f32 {
+    if pending > 0 || result.perfect_clear || result.spin == Spin::Full {
+        return 0.0;
+    }
+    let mut v = 0.0;
+    if height <= w.low_clear_height && (1..=3).contains(&result.lines) {
+        v += w.low_clear;
+    }
+    if height <= w.low_single_height && result.lines == 1 {
+        v += w.low_single;
+    }
+    v
+}
+
+/// 迎え撃ちで、大きな攻撃(Tスピン・テトリス)を撃つ時機の点(`Weights::counter_fire_min`)。`pending` は置く前の予告の行数。
+/// 予告が `counter_fire_min` 行より少なければ(相手の REN の1回が小さければ)撃たずにためておくよう `counter_fire_early` を付ける。
+pub fn counter_fire_value(w: &Weights, result: &ClearResult, pending: u32) -> f32 {
+    if w.counter_fire_min == 0 || result.perfect_clear {
+        return 0.0;
+    }
+    // 【2026-11-14・ユーザー「TSSも止めて再比較」】TSD だけを止めると、T を Tスピンシングルで使ってしまった(TSS 0.38→1.09回/局)。
+    // T を溝にためたまま受けるため、Tスピン(シングルを含む)とテトリスを、予告が少ない時は撃たない
+    let big = (result.spin == Spin::Full && result.lines >= 1) || (result.spin == Spin::None && result.lines == 4);
+    if big && pending < w.counter_fire_min {
+        w.counter_fire_early
     } else {
         0.0
     }
@@ -786,6 +882,46 @@ tsd_stock = 1.0
     }
 
     #[test]
+    fn 高い時は中あけを組まない() {
+        // 【2026-11-14・ユーザー「C4Wを積み込む際、高いところで出っ張りを作ったせいで負けになっている」「高い時はC4Wを組まない」】
+        let rules = Rules::ppt2();
+        let w = Weights { center_well_rows: 5.0, ren_potential: 1.0, c4w_max_height: 14, ..Weights::default() };
+        let plain = |rows: usize| Board::from_rows(&vec!["###...####"; rows]);
+        let well = |rows: usize| Board::from_rows(&vec!["###....###"; rows]);
+        let gain = |rows: usize, extra: u32| {
+            let ctx = EvalContext { garbage: Garbage { extra_height: extra, pending: extra }, ..Default::default() };
+            evaluate(&w, &rules, &well(rows), false, &ctx) - evaluate(&w, &rules, &plain(rows), false, &ctx)
+        };
+        assert!(gain(10, 0) > 0.0, "14段までは中あけに加点する");
+        assert!(gain(14, 0) > 0.0, "ちょうど14段も加点する");
+        assert_eq!(gain(15, 0), 0.0, "15段を超えたら加点しない");
+        assert_eq!(gain(10, 5), 0.0, "予告・せり上がりを足して14段を超えたら加点しない");
+        // おじゃまが8段以上せり上がっていても組まない
+        let wg = Weights { center_well_rows: 5.0, c4w_max_garbage: 8, ..Weights::default() };
+        let mut with_garbage = vec!["###....###"; 4];
+        with_garbage.extend(vec!["####.#####"; 8]);
+        let mut plain_garbage = vec!["###...####"; 4];
+        plain_garbage.extend(vec!["####.#####"; 8]);
+        let ctx0 = EvalContext::default();
+        assert_eq!(
+            evaluate(&wg, &rules, &Board::from_rows(&with_garbage), false, &ctx0),
+            evaluate(&wg, &rules, &Board::from_rows(&plain_garbage), false, &ctx0),
+            "せり上がり8段で中あけに加点しない"
+        );
+        with_garbage.truncate(4 + 7);
+        plain_garbage.truncate(4 + 7);
+        assert!(
+            evaluate(&wg, &rules, &Board::from_rows(&with_garbage), false, &ctx0)
+                > evaluate(&wg, &rules, &Board::from_rows(&plain_garbage), false, &ctx0),
+            "7段なら加点する"
+        );
+        // 0 なら今までどおり制限しない
+        let free = Weights { c4w_max_height: 0, ..w.clone() };
+        let ctx = EvalContext::default();
+        assert!(evaluate(&free, &rules, &well(18), false, &ctx) > evaluate(&free, &rules, &plain(18), false, &ctx));
+    }
+
+    #[test]
     fn 早撃ちのとどめは相手の相殺を引く() {
         let rules = Rules::ppt2();
         assert_eq!(opponent_cancel(&rules, 0), 0);
@@ -1006,6 +1142,48 @@ tsd_stock = 1.0
         assert_eq!(tsd_fire_value(&w, &tsd, 5, 4), 3.0, "予告があればカウンター");
         let tss = ClearResult { spin: Spin::Full, lines: 1, ..Default::default() };
         assert_eq!(tsd_fire_value(&w, &tss, 5, 0), 0.0);
+    }
+
+    #[test]
+    fn 迎え撃ちは予告が少ない時にtsdを撃たずにためる() {
+        // 【2026-11-14・ユーザー「TSDは4段分なので相手のRENが1段攻撃の場合は操作せずに受け入れて攻撃力が上がってから相殺する構想です」】
+        let w = Weights { counter_fire_min: 3, counter_fire_early: -6.0, ..Weights::default() };
+        let tsd = ClearResult { spin: Spin::Full, lines: 2, ..Default::default() };
+        let tetris = ClearResult { lines: 4, ..Default::default() };
+        let single = ClearResult { lines: 1, ..Default::default() };
+        assert_eq!(counter_fire_value(&w, &tsd, 1), -6.0, "予告1行に TSD は撃たない");
+        assert_eq!(counter_fire_value(&w, &tsd, 0), -6.0, "予告が無い時もためる");
+        assert_eq!(counter_fire_value(&w, &tsd, 3), 0.0, "予告3行なら撃って相殺");
+        assert_eq!(counter_fire_value(&w, &tetris, 2), -6.0, "テトリスも同じ");
+        assert_eq!(counter_fire_value(&w, &single, 1), 0.0, "小さな消去は関係ない");
+        let tss = ClearResult { spin: Spin::Full, lines: 1, ..Default::default() };
+        assert_eq!(counter_fire_value(&w, &tss, 1), -6.0, "Tスピンシングルでも T を使わずにためる");
+        assert_eq!(counter_fire_value(&w, &tss, 4), 0.0);
+        assert_eq!(counter_fire_value(&Weights::default(), &tsd, 1), 0.0, "0 なら使わない");
+    }
+
+    #[test]
+    fn 低い時の小さな消去を減点する() {
+        // 【2026-11-14・ユーザー「たいして火力が出るわけでもないのに掘りRENをしたがる癖があります。盤面が低い時は発火よりも
+        // 火力を用意することを優先したい」】
+        let w = Weights { low_clear: -2.0, low_clear_height: 8, ..Weights::default() };
+        let clear = |lines, spin| ClearResult { lines, spin, ..Default::default() };
+        assert_eq!(low_clear_value(&w, &clear(1, Spin::None), 6, 0), -2.0, "低い時の単発");
+        assert_eq!(low_clear_value(&w, &clear(2, Spin::None), 8, 0), -2.0, "8段までは低い");
+        assert_eq!(low_clear_value(&w, &clear(3, Spin::Mini), 4, 0), -2.0, "ミニも小さな消去");
+        assert_eq!(low_clear_value(&w, &clear(1, Spin::None), 9, 0), 0.0, "高ければ減点しない");
+        assert_eq!(low_clear_value(&w, &clear(1, Spin::None), 6, 3), 0.0, "予告がある(相殺が要る)時は減点しない");
+        assert_eq!(low_clear_value(&w, &clear(4, Spin::None), 6, 0), 0.0, "テトリスは減点しない");
+        assert_eq!(low_clear_value(&w, &clear(2, Spin::Full), 6, 0), 0.0, "TSD は減点しない");
+        let pc = ClearResult { lines: 2, perfect_clear: true, ..Default::default() };
+        assert_eq!(low_clear_value(&w, &pc, 2, 0), 0.0, "パフェは減点しない");
+        assert_eq!(low_clear_value(&Weights::default(), &clear(1, Spin::None), 2, 0), 0.0, "0 なら使わない");
+        // とても低い時の単発には、さらに減点(パフェの後に単発を挟まない。2026-11-14)
+        let w = Weights { low_clear: -2.0, low_clear_height: 8, low_single: -5.0, low_single_height: 4, ..Weights::default() };
+        assert_eq!(low_clear_value(&w, &clear(1, Spin::None), 3, 0), -7.0, "とても低い時の単発");
+        assert_eq!(low_clear_value(&w, &clear(2, Spin::None), 3, 0), -2.0, "2列消しには足さない");
+        assert_eq!(low_clear_value(&w, &clear(1, Spin::None), 6, 0), -2.0, "5段以上なら足さない");
+        assert_eq!(low_clear_value(&w, &clear(1, Spin::None), 3, 2), 0.0, "予告があれば減点しない");
     }
 
     #[test]

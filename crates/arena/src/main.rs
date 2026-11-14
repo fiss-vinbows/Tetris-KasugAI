@@ -70,6 +70,8 @@ impl Engine {
                     OpeningTracker::with_mode(seed, *opening_mode)
                         .with_after_pc(weights.after_pc_seed, weights.after_pc_no_rival)
                         .with_attacked_well(weights.td_attacked_well, weights.td_attacked_clears)
+                        .with_after_pc_vs_c4w(weights.after_pc_vs_c4w_plain)
+                        .with_pc_check(weights.td_pc_check)
                 });
                 Box::new(agent)
             }

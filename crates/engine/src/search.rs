@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use crate::opening::Opening;
 use crate::strategy::Strategy;
 use crate::eval::{
-    battle_value, evaluate, opponent_threat, ren_potential, reward, rival_fire_value, ren_cut_value, tsd_fire_value, BattleContext, EvalContext, Garbage, Weights,
+    battle_value, counter_fire_value, evaluate, low_clear_value, opponent_threat, ren_potential, reward, rival_fire_value, ren_cut_value, tsd_fire_value, BattleContext, EvalContext, Garbage, Weights,
 };
 use tetrisai_core::{generate_into, Board, ClearResult, Move, Piece, Placement, PlayerState, Rules, Spawn};
 
@@ -372,7 +372,20 @@ pub fn search(
                     {
                         continue;
                     }
+                    // 【2026-11-14・ユーザー「パフェ後に単発消しを入れているのを修正して」】低い時の小さな消去の点は、テンプレの間
+                    // 以外で使う(パフェの後に次のテンプレが組めない「素の状態」でも単発を選んでいた)
+                    let low = if matches!(root.opening, Opening::Template(_)) {
+                        0.0
+                    } else {
+                        low_clear_value(weights, &result, parent.state.board.max_height() + parent.risen, incoming_total - parent.consumed)
+                    };
                     let mut r = parent.reward
+                        + low
+                        + if root.strategy == crate::strategy::Strategy::Counter {
+                            counter_fire_value(weights, &result, incoming_total - parent.consumed)
+                        } else {
+                            0.0
+                        }
                         + reward(weights, rules, mv, &result)
                         + if root.no_c4w { 0.0 } else { ren_cut_value(weights, parent.state.consecutive_clears, result.lines, &state.board) }
                         + rival_fire_value(weights, root.strategy, parent.state.consecutive_clears, result.lines, &parent.state.board, battle.opponent_rows)
@@ -384,7 +397,7 @@ pub fn search(
                                 &result,
                                 parent.state.board.max_height() + parent.risen,
                                 incoming_total - parent.consumed,
-                            )
+)
                         };
                     // 序盤のテンプレ: 図どおりの手に加点する。消した後は、消した回数が TEMPLATE_CLEARS に届くまで続ける
                     // (読みの中では消えた行を図から取り除かないので、消した後の加点は次に局面を受け取ってから)
@@ -548,7 +561,18 @@ pub fn search(
                             strategy: root.strategy,
                             no_c4w: root.no_c4w,
                         };
+                        let low = if matches!(root.opening, Opening::Template(_)) {
+                            0.0
+                        } else {
+                            low_clear_value(weights, &result, node.state.board.max_height() + node.risen, incoming_total - node.consumed)
+                        };
                         let s = node.reward
+                            + low
+                            + if root.strategy == crate::strategy::Strategy::Counter {
+                                counter_fire_value(weights, &result, incoming_total - node.consumed)
+                            } else {
+                                0.0
+                            }
                             + reward(weights, rules, mv, &result)
                             + if root.no_c4w { 0.0 } else { ren_cut_value(weights, node.state.consecutive_clears, result.lines, &state.board) }
                             + rival_fire_value(weights, root.strategy, node.state.consecutive_clears, result.lines, &node.state.board, battle.opponent_rows)
@@ -560,7 +584,7 @@ pub fn search(
                                     &result,
                                     node.state.board.max_height() + node.risen,
                                     incoming_total - node.consumed,
-                                )
+)
                             }
                             + evaluate(weights, rules, &state.board, state.back_to_back, &ctx)
                             + battle_value(weights, &battle, outgoing, chunk, our_top, consumed - risen);

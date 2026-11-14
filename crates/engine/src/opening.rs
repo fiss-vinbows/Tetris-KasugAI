@@ -921,6 +921,29 @@ fn pco_next(root: &Root, placed: u32, budget_ms: u64, rules: &Rules) -> Option<(
     .map(|(a, p)| (a.loc, p))
 }
 
+/// TSD の後のパフェの段で、パフェまで届く見込みがこの割合以上なら、テンプレを続ける(`pc_reachable`)
+const PC_KEEP: f32 = 0.3;
+/// `pc_reachable` で探す時間
+const PC_CHECK_BUDGET_MS: u64 = 20;
+
+/// 今の盤面から、見えているミノ(と袋の残り)で4段以内のパフェまで届く見込みが `PC_KEEP` 以上あるか。
+fn pc_reachable(root: &Root, rules: &Rules) -> bool {
+    let board = root.state.board;
+    let cells: u32 = board.cols.iter().map(|c| c.count_ones()).sum();
+    (board.max_height()..=4).filter(|&rows| rows * 10 >= cells && (rows * 10 - cells) % 4 == 0).any(|rows| {
+        crate::pco::best_action(
+            &board,
+            rows,
+            root.hold,
+            &root.queue,
+            &root.bag,
+            std::time::Duration::from_millis(PC_CHECK_BUDGET_MS),
+            Some(rules.spawn()),
+        )
+        .is_some_and(|(_, p)| p >= PC_KEEP)
+    })
+}
+
 /// 対局の序盤の作戦を選び、進み具合を追う(bot と対戦シミュレーターで使う)。
 ///
 /// 局面を受け取るたびに `observe` を呼ぶ。空の盤面を見たら(対局の始め。パフェの後も含む)、半々で
@@ -947,6 +970,14 @@ pub struct OpeningTracker {
     attacked_clears: u32,
     /// この局で開幕C4W(種3)を選んだ(`OpeningMode::Custom` で中盤の C4W を使わない時も、この局は C4W を使う)
     chose_seed3: bool,
+    /// 相手が C4W の局でパフェの後は素の打ち方にする(`Weights::after_pc_vs_c4w_plain`。`with_after_pc_vs_c4w`)
+    after_pc_vs_c4w_plain: bool,
+    /// この局で相手の C4W を見た(`note_opponent`)
+    opponent_c4w: bool,
+    /// この局は、相手が C4W でパフェまで撃ったので、終わりまでテンプレも C4W も使わない
+    plain_after_pc: bool,
+    /// TSD の後のパフェの段で、パフェまで届く見込みが無ければテンプレを終える(`Weights::td_pc_check`。`with_pc_check`)
+    pc_check: bool,
 }
 
 impl OpeningTracker {
@@ -968,6 +999,10 @@ impl OpeningTracker {
             attacked_well: false,
             attacked_clears: 1,
             chose_seed3: false,
+            after_pc_vs_c4w_plain: false,
+            opponent_c4w: false,
+            plain_after_pc: false,
+            pc_check: false,
         }
     }
 
@@ -991,7 +1026,34 @@ impl OpeningTracker {
     /// C4W を使わないモードか(`OpeningMode::BanC4w` と、中盤の C4W を外した `Custom`)。`Root::no_c4w` に入れ、
     /// 作戦層の「C4W で対抗」を「早撃ち」にする。`Custom` で開幕C4W(種3)を選んだ局は C4W を使う。
     pub fn bans_c4w(&self) -> bool {
-        self.mode.bans_mid_c4w() && !self.chose_seed3
+        (self.mode.bans_mid_c4w() && !self.chose_seed3) || self.plain_after_pc
+    }
+
+    /// TSD の後のパフェの段で、パフェまで届く見込みが無ければテンプレを終えるか(`Weights::td_pc_check`)。
+    pub fn with_pc_check(mut self, on: bool) -> Self {
+        self.pc_check = on;
+        self
+    }
+
+    /// 相手が C4W の局でパフェまで撃った後か(その局の終わりまで、作戦層を迎え撃ち(早撃ち)にする)。
+    /// 【2026-11-14・ユーザー「相手が開幕C4Wの時はTDパフェの後は必ず迎撃としたい」】相手の中あけが減っても(撃ち始めても)
+    /// 通常に戻さない
+    pub fn force_counter(&self) -> bool {
+        self.plain_after_pc
+    }
+
+    /// 相手が C4W の局で、パフェの後に素の打ち方にするか(`Weights::after_pc_vs_c4w_plain`)。
+    pub fn with_after_pc_vs_c4w(mut self, on: bool) -> Self {
+        self.after_pc_vs_c4w_plain = on;
+        self
+    }
+
+    /// 相手の盤面を見る(局面を受け取るたび)。中あけが `OPPONENT_C4W_ROWS` 行以上あれば、この局の相手は C4W とみなす
+    /// (新しい局の始めで戻す)。
+    pub fn note_opponent(&mut self, opponent: &Board) {
+        if crate::shape::ren_rows(opponent) >= crate::strategy::OPPONENT_C4W_ROWS {
+            self.opponent_c4w = true;
+        }
     }
 
     /// 序盤の作戦の間でも中あけの評価を使うか(`Root::opening_well` に入れる)。
@@ -1040,7 +1102,19 @@ impl OpeningTracker {
                 // テンプレか開幕パフェでパフェまで撃った(その途中で盤面が空になった)
                 let from_pc = (matches!(self.state, State::Template(_)) && changed) || matches!(self.state, State::Pco(n, _) if n > 0);
                 self.attacked = false;
-                self.choose(root, rules);
+                // 【2026-11-14・ユーザー「C4W相手にTDパフェを達成したが勝ち切れないときにTDTDやC4Wを組むのをやめてTSDドネイトや
+                // テトリス消しを中心にした方針として」】相手が C4W の局でパフェまで撃ったら、次のテンプレを選ばず、
+                // その局の終わりまで C4W も使わない(素の打ち方 = B2B 重視なら TSD・テトリス中心)
+                if !from_pc {
+                    self.opponent_c4w = false;
+                    self.plain_after_pc = false;
+                }
+                if from_pc && self.after_pc_vs_c4w_plain && self.opponent_c4w {
+                    self.plain_after_pc = true;
+                    self.state = State::Done;
+                } else {
+                    self.choose(root, rules);
+                }
                 let (seed, normal) = (self.after_pc_seed, self.after_pc_no_rival);
                 // 次のテンプレが組めなければ、C4W に向かわず火力の種を作る
                 if from_pc && seed && matches!(self.state, State::Plain(_)) {
@@ -1086,6 +1160,10 @@ impl OpeningTracker {
         if let State::Template(t) = &self.state {
             let past_tsd = t.clears >= 2 || (t.pc_after_tst && t.clears >= 1);
             if past_tsd && (t.rise > 0 || root.incoming.iter().any(|g| g.lines > 0)) {
+                self.state = State::Done;
+            } else if past_tsd && self.pc_check && !board.is_empty() && !pc_reachable(root, rules) {
+                // 【2026-11-14・ユーザー「パフェが取れないツモだったのでS→Zで単発消しをしているが行動としては極めて弱いので
+                // やらないようにして」】見えているミノ(と袋の残り)でパフェまで届く見込みが無ければ、テンプレを終える
                 self.state = State::Done;
             }
         }
@@ -1741,6 +1819,74 @@ pub(crate) mod tests {
         let full = board.full_lines();
         board.remove_lines(full);
         assert!(board.is_empty(), "パフェ: {board:?}");
+    }
+
+    #[test]
+    fn tsdの後にパフェまで届かなければテンプレを終える() {
+        // 【2026-11-14・ユーザー「実戦ログの11戦目にパフェが取れないツモだったのでS→Zで単発消しをしているが行動としては極めて弱いので
+        // やらないようにして」】実機(debug_log_20261114_164308 の1P 局11 381手目の後)の盤面: TST→TSD の後に2行が残り、
+        // パフェには O が要るが、見えているミノに O が無い
+        let rules = Rules::ppt2();
+        let honey = tpl("はちみつ砲").clone();
+        let board = Board::from_rows(&["####..####", "####..####"]);
+        let observe = |pc_check: bool, queue: Vec<Piece>| {
+            let mut tracker = OpeningTracker::with_mode(3, OpeningMode::Td).with_pc_check(pc_check);
+            tracker.state = State::Template(Arc::new(Template { clears: 2, ..honey.as_ref().clone() }));
+            tracker.last_board = Some(board);
+            let root = Root { state: PlayerState::new(board), queue, bag: vec![Piece::L, Piece::J], ..Default::default() };
+            matches!(tracker.observe(&root, &rules), Opening::Template(_))
+        };
+        use Piece::*;
+        assert!(!pc_reachable(&Root { state: PlayerState::new(board), queue: vec![S, Z, L, J, I, T], bag: vec![L, J], ..Default::default() }, &rules));
+        assert!(!observe(true, vec![S, Z, L, J, I, T]), "O が来なければテンプレを終える");
+        assert!(observe(true, vec![O, S, Z, L, J, I]), "O が来ればパフェまで続ける");
+        assert!(observe(false, vec![S, Z, L, J, I, T]), "切り替えが無ければ今までどおり");
+    }
+
+    #[test]
+    fn c4wの相手にパフェまで撃ったら素の打ち方にする() {
+        // 【2026-11-14・ユーザー「C4W相手にTDパフェを達成したが勝ち切れないときにTDTDやC4Wを組むのをやめてTSDドネイトや
+        // テトリス消しを中心にした方針として」】
+        let rules = Rules::ppt2();
+        let honey = tpl("はちみつ砲").clone();
+        let before_pc = Board::from_rows(&["##########", "#########."]);
+        let empty_root = Root {
+            state: PlayerState::new(Board::new()),
+            queue: vec![Piece::I, Piece::O, Piece::L, Piece::S, Piece::Z, Piece::T],
+            ..Default::default()
+        };
+        let after_pc = |on: bool, opponent_c4w: bool| {
+            let mut tracker = OpeningTracker::with_mode(3, OpeningMode::Td).with_after_pc_vs_c4w(on);
+            tracker.state = State::Template(Arc::new(Template { clears: 2, ..honey.as_ref().clone() }));
+            tracker.last_board = Some(before_pc);
+            if opponent_c4w {
+                tracker.note_opponent(&Board::from_rows(&["###....###"; 6]));
+            }
+            let opening = tracker.observe(&empty_root, &rules);
+            (opening, tracker)
+        };
+        let (opening, tracker) = after_pc(true, true);
+        assert!(!opening.is_active(), "TDTD(次のテンプレ)を選ばない");
+        assert!(tracker.bans_c4w(), "C4W も使わない");
+        assert!(tracker.force_counter(), "その局の終わりまで迎え撃ち");
+        // 相手が C4W でなければ今までどおり次のテンプレを選べる
+        let (_, tracker) = after_pc(true, false);
+        assert!(!tracker.bans_c4w());
+        assert!(!tracker.force_counter(), "相手が C4W でなければ迎え撃ちにしない");
+        // 切り替えが無ければ今までどおり
+        let (_, tracker) = after_pc(false, true);
+        assert!(!tracker.bans_c4w());
+        // 相手の中あけが浅ければ C4W とみなさない
+        let mut tracker = OpeningTracker::with_mode(3, OpeningMode::Td).with_after_pc_vs_c4w(true);
+        tracker.note_opponent(&Board::from_rows(&["###....###"; 2]));
+        assert!(!tracker.opponent_c4w);
+        // 新しい局の始め(パフェではない空の盤面)で戻す
+        let (_, mut tracker) = after_pc(true, true);
+        tracker.state = State::Done;
+        tracker.last_board = Some(Board::new());
+        tracker.observe(&empty_root, &rules);
+        assert!(!tracker.bans_c4w(), "次の局では戻す");
+        assert!(!tracker.force_counter(), "次の局では戻す");
     }
 
     #[test]
