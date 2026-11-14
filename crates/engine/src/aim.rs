@@ -84,7 +84,10 @@ pub fn describe(root: &Root, plan: &[Move], rules: &Rules) -> String {
     }
     let theirs = root.opponent.map_or(0, |o| shape::ren_rows(&o.board));
     let first = aim.lines().next().unwrap_or("");
-    format!("{}(相手{theirs}行)\n{first}", root.strategy.label())
+    // 【2026-11-14・ユーザー「TBAの情報パネルに相手のC4Wに火力で対抗する場合は狙いにC4W迎撃と記載してください」】
+    // C4W を組まずに火力で答える作戦(早撃ち・迎え撃ち)は「C4W迎撃」と書く(対戦シミュレーターの集計は作戦の名前のまま)
+    let label = if root.strategy.avoids_c4w() { "C4W迎撃" } else { root.strategy.label() };
+    format!("{label}(相手{theirs}行)\n{first}")
 }
 
 fn describe_plan(root: &Root, plan: &[Move], rules: &Rules) -> String {
@@ -246,7 +249,9 @@ mod tests {
         r.opponent = Some(opponent);
         r.strategy = Strategy::Rush;
         let t = find_move(&r, Piece::T, 2, Spin::Full);
-        assert_eq!(describe(&r, &[t], &rules), "早撃ち(相手9行)\nTSD(この手)");
+        assert_eq!(describe(&r, &[t], &rules), "C4W迎撃(相手9行)\nTSD(この手)");
+        r.strategy = Strategy::Counter;
+        assert_eq!(describe(&r, &[t], &rules), "C4W迎撃(相手9行)\nTSD(この手)");
         r.strategy = Strategy::C4WRival;
         assert_eq!(describe(&r, &[t], &rules), "C4Wで対抗(相手9行)\nTSD(この手)");
     }

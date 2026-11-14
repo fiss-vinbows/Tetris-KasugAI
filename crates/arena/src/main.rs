@@ -464,4 +464,16 @@ fn summary(names: &[String; 2], results: &[GameResult]) {
             count(Loss::GarbageOverflow)
         );
     }
+    println!("作戦ごとの手数(相手の情報がある手):");
+    for (label, c) in tetrisai_arena::agent::STRATEGY_MOVES.lock().unwrap().iter() {
+        let total = c.iter().sum::<u64>().max(1) as f64;
+        let pct = |n: u64| 100.0 * n as f64 / total;
+        println!(
+            "  {label}: 通常 {:.1}% / C4Wで対抗 {:.1}% / 早撃ち {:.1}% / 迎え撃ち {:.1}%",
+            pct(c[0]),
+            pct(c[1]),
+            pct(c[2]),
+            pct(c[3])
+        );
+    }
 }

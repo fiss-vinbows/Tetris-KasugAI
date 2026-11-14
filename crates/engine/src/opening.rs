@@ -155,8 +155,38 @@ pub fn priority_templates() -> &'static [Arc<Template>] {
     })
 }
 
+/// 使わない図(テンプレの名前, 図の section に含まれる言葉)。
+///
+/// 【2026-11-14・ユーザー「くろみつ砲でパフェが望めないツモの時にSミノ・Zミノを端に置く癖があります。そのせいでソフトドロップが
+/// 多くみられる」「はい、入れる」】くろみつ砲の妥協形2(%O>%Z>%S>%I の場合)は、パフェをあきらめて TSD を組む図で、2巡目に
+/// Z(左右反転では S)を端の高い所に浮かせて置き、その下へ後のミノを差し込む。実機で TST の直後に端へ S・Z を横置きしてパフェの
+/// 無かった局は、T 以外のソフトドロップが1局 1.00回(ほかは 0.24〜0.50回)。外すと対戦シミュレーター(1000局)で T 以外の
+/// ソフトドロップの手が 15〜18% 減り、勝率は同じか少し上(開幕TSD の相手に 44.9%→46.5%、種3C4W に 27.3%→27.6%)。
+/// TST まで届かない局が約2%増える(records/kuromitsu_compromise/eval.txt・eval3.txt)。テンプレが終わった後に C4W へ移す
+/// 案も比べたが、外すだけと差が無かった
+const SKIPPED_FORMS: [(&str, &str); 1] = [("くろみつ砲", "妥協形2")];
+
+/// 使わない図か(`SKIPPED_FORMS`)。環境変数 TD_SKIP_FORMS(「名前:言葉」を ',' 区切り)で足せる(比べる時用)。
+fn skipped_form(template: &str, section: &str) -> bool {
+    if SKIPPED_FORMS.iter().any(|&(n, s)| n == template && section.contains(s)) {
+        return true;
+    }
+    static SKIP: OnceLock<Vec<(String, String)>> = OnceLock::new();
+    SKIP.get_or_init(|| {
+        std::env::var("TD_SKIP_FORMS")
+            .map(|list| {
+                list.split(',')
+                    .filter_map(|e| e.split_once(':').map(|(n, s)| (n.to_string(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+    .iter()
+    .any(|(n, s)| n == template && section.contains(s.as_str()))
+}
+
 /// engine に埋め込んだ図を初回に読む(`EXCLUDED_TEMPLATES` は除く)。
-fn all_templates() -> &'static [Arc<Template>] {
+pub(crate) fn all_templates() -> &'static [Arc<Template>] {
     static TEMPLATES: OnceLock<Vec<Arc<Template>>> = OnceLock::new();
     TEMPLATES.get_or_init(|| {
         let mut raw: Vec<RawTemplate> =
@@ -168,9 +198,11 @@ fn all_templates() -> &'static [Arc<Template>] {
         raw.into_iter()
             .filter(|t| !EXCLUDED_TEMPLATES.contains(&t.name.as_str()))
             .map(|t| {
+                let name = t.name.clone();
                 let forms = t
                     .forms
                     .into_iter()
+                    .filter(|f| !skipped_form(&name, &f.section))
                     .filter_map(|f| {
                         let mut items = Vec::new();
                         let mut last = Vec::new();
@@ -330,6 +362,15 @@ impl Form {
         true
     }
 
+    /// `board` にミノ `loc` を置く手が、図の最後に入れる T を、他のミノがそろう前に図の溝へ入れる手か。
+    /// 【2026-11-14・ユーザー「くろみつ砲でIミノを入れずにTSTをしようとする挙動が見られました。悪手なので修正してください」】
+    pub fn premature_last(&self, board: &Board, loc: &PieceLocation) -> bool {
+        let cells = loc.sorted_cells();
+        self.consistent(board)
+            && self.last.iter().any(|&i| self.items[i].0 == loc.piece && self.items[i].1 == cells)
+            && !self.accepts(board, loc)
+    }
+
     /// 1巡目の図か(既に置いてあるブロックが無い)。
     pub fn is_first(&self) -> bool {
         self.existing.iter().all(|&c| c == 0)
@@ -436,6 +477,12 @@ impl Template {
     /// `board` にミノ `loc` を置く手が、このテンプレのどれかの図どおりか。
     pub fn accepts(&self, board: &Board, loc: &PieceLocation) -> bool {
         self.forms.iter().any(|f| f.accepts(board, loc))
+    }
+
+    /// `board` にミノ `loc` を置く手が、どれかの図の最後に入れる T を、他のミノ(TST の壁の I など)がそろう前に入れる手か
+    /// (行がそろっていないので消えない Tスピンになる)。図どおりの手(`accepts`)なら偽。
+    pub fn premature_last(&self, board: &Board, loc: &PieceLocation) -> bool {
+        !self.accepts(board, loc) && self.forms.iter().any(|f| f.premature_last(board, loc))
     }
 
     /// 空の盤面から、見えているミノ(操作ミノ・NEXT・HOLD)で1巡目の図のどれかを組めるか。
@@ -736,6 +783,63 @@ pub enum OpeningMode {
     Seed3,
     /// 開幕パフェ(見込みが低ければ TDテンプレか開幕TSD。2026-11-09)
     Pco,
+    /// C4W を使わない(2026-11-13・ユーザー「C4Wを禁止するモードを設けたい」)。開幕は TDテンプレ・開幕TSD から均等に選び、
+    /// 中盤も中あけの評価・「C4W で対抗」・テンプレの途中で攻撃された時の C4W への切り替えを使わない
+    /// (相手が C4W なら「早撃ち」で答える)
+    BanC4w,
+    /// 全自動の設定で細かく選んだもの(2026-11-14・ユーザー「全自動モードにおいて目指すものの設定を詳細に切り替えられる
+    /// ようにしたい」)。`--opening` に「td+tsd+no_mid_c4w」のように「+」でつないで渡す
+    Custom(OpeningChoice),
+}
+
+/// 全自動の設定で選んだ開幕と中盤の C4W(`OpeningMode::Custom`)。
+///
+/// 開幕は選んだものから対局ごとに均等に選ぶ。`pco` は組める見込みがあれば先に狙い、無ければほかの選んだ開幕
+/// (ほかに何も選んでいなければ TDテンプレか開幕TSD)。何も選ばなければ素の状態。
+/// `mid_c4w` が false なら中盤も C4W を使わない(`BanC4w` と同じ)。ただし開幕C4W(種3)を選んだ局は C4W を使う。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpeningChoice {
+    pub td: bool,
+    pub tsd: bool,
+    pub seed3: bool,
+    pub pco: bool,
+    pub mid_c4w: bool,
+}
+
+impl OpeningChoice {
+    /// 「td+tsd+no_mid_c4w」の形から。知らない言葉があれば None。`plain` は何も選ばない時の目印(読み飛ばす)。
+    fn parse(s: &str) -> Option<Self> {
+        let mut c = OpeningChoice { td: false, tsd: false, seed3: false, pco: false, mid_c4w: true };
+        for token in s.split('+').map(str::trim) {
+            match token {
+                "td" => c.td = true,
+                "tsd" => c.tsd = true,
+                "seed3" => c.seed3 = true,
+                "pco" => c.pco = true,
+                "no_mid_c4w" => c.mid_c4w = false,
+                "plain" => {}
+                _ => return None,
+            }
+        }
+        Some(c)
+    }
+}
+
+/// `--opening` の値から打ち方(`style=名前`。重みを選ぶ。2026-11-14)を取り出す。返り値は残りの開幕の指定と打ち方。
+/// 打ち方だけの指定なら、開幕の指定は空になる(既定の開幕)。
+pub fn split_style(spec: &str) -> (String, Option<String>) {
+    let mut style = None;
+    let rest: Vec<&str> = spec
+        .split('+')
+        .filter(|t| match t.trim().strip_prefix("style=") {
+            Some(name) => {
+                style = Some(name.to_string());
+                false
+            }
+            None => true,
+        })
+        .collect();
+    (rest.join("+"), style)
 }
 
 impl OpeningMode {
@@ -749,8 +853,14 @@ impl OpeningMode {
             "tsd" => Some(Self::Tsd),
             "seed3" => Some(Self::Seed3),
             "pco" => Some(Self::Pco),
-            _ => None,
+            "ban_c4w" => Some(Self::BanC4w),
+            _ => OpeningChoice::parse(s).map(Self::Custom),
         }
+    }
+
+    /// 中盤も C4W を使わないモードか(開幕C4W を選んだ局を除く)。
+    fn bans_mid_c4w(self) -> bool {
+        matches!(self, Self::BanC4w | Self::Custom(OpeningChoice { mid_c4w: false, .. }))
     }
 }
 
@@ -835,6 +945,8 @@ pub struct OpeningTracker {
     attacked_well: bool,
     /// テンプレで何回消すまでに攻撃されたら速攻とみなすか(`Weights::td_attacked_clears`)
     attacked_clears: u32,
+    /// この局で開幕C4W(種3)を選んだ(`OpeningMode::Custom` で中盤の C4W を使わない時も、この局は C4W を使う)
+    chose_seed3: bool,
 }
 
 impl OpeningTracker {
@@ -855,6 +967,7 @@ impl OpeningTracker {
             attacked: false,
             attacked_well: false,
             attacked_clears: 1,
+            chose_seed3: false,
         }
     }
 
@@ -864,7 +977,8 @@ impl OpeningTracker {
     /// `clears`: テンプレで何回消すまでに攻撃されたら速攻とみなすか。対戦シミュレーター(1000局)で 0回(撃つ前だけ)・1回・2回は
     /// 開幕TSD に 33.7%・35.5%・35.8%、TDテンプレ(run16)に 58.8%(引き分けが多い)・58.9%・58.4%(切り替えない run16 は 32.7%)。
     pub fn with_attacked_well(mut self, on: bool, clears: u32) -> Self {
-        self.attacked_well = on;
+        // C4W を使わないモードでは、攻撃されても C4W の形を作らない
+        self.attacked_well = on && !self.mode.bans_mid_c4w();
         self.attacked_clears = clears;
         self
     }
@@ -872,6 +986,12 @@ impl OpeningTracker {
     /// テンプレの途中で攻撃された局は、その局の終わりまで作戦層を「C4W で対抗」にする(相手が C4W でなくても。2026-11-10)
     pub fn force_rival(&self) -> bool {
         self.attacked_well && self.attacked
+    }
+
+    /// C4W を使わないモードか(`OpeningMode::BanC4w` と、中盤の C4W を外した `Custom`)。`Root::no_c4w` に入れ、
+    /// 作戦層の「C4W で対抗」を「早撃ち」にする。`Custom` で開幕C4W(種3)を選んだ局は C4W を使う。
+    pub fn bans_c4w(&self) -> bool {
+        self.mode.bans_mid_c4w() && !self.chose_seed3
     }
 
     /// 序盤の作戦の間でも中あけの評価を使うか(`Root::opening_well` に入れる)。
@@ -960,13 +1080,23 @@ impl OpeningTracker {
                 self.state = pco_next(root, n, PCO_BUDGET_MS, rules).map_or(State::Done, |(loc, _)| State::Pco(n, loc));
             }
         }
+        // 【2026-11-14・ユーザー「相手の速攻でTDパフェができなくなった場合TSDまではテンプレでその後の単発消しは解除してほしい」】
+        // TSD の後(TST→パフェのテンプレは TST の後)のパフェの段で、おじゃまがせり上がった(図をずらした)か予告があれば、
+        // パフェはもう組めないのでテンプレを終え、図のための単発・2列消しをやめる
+        if let State::Template(t) = &self.state {
+            let past_tsd = t.clears >= 2 || (t.pc_after_tst && t.clears >= 1);
+            if past_tsd && (t.rise > 0 || root.incoming.iter().any(|g| g.lines > 0)) {
+                self.state = State::Done;
+            }
+        }
         self.last_queue_len = root.queue.len();
         self.last_board = Some(board);
         self.opening()
     }
 
     fn choose(&mut self, root: &Root, rules: &Rules) {
-        if self.mode == OpeningMode::Pco {
+        self.chose_seed3 = false;
+        if matches!(self.mode, OpeningMode::Pco | OpeningMode::Custom(OpeningChoice { pco: true, .. })) {
             if let Some((loc, p)) = pco_next(root, 0, PCO_FIRST_BUDGET_MS, rules) {
                 if p >= PCO_START {
                     self.state = State::Pco(0, loc);
@@ -977,9 +1107,30 @@ impl OpeningTracker {
         let mode = match self.mode {
             OpeningMode::Pco => [OpeningMode::Td, OpeningMode::Tsd][(self.next_random() % 2) as usize],
             OpeningMode::Random => [OpeningMode::Td, OpeningMode::Tsd, OpeningMode::Seed3][(self.next_random() % 3) as usize],
-            OpeningMode::RandomNoC4w => [OpeningMode::Td, OpeningMode::Tsd][(self.next_random() % 2) as usize],
+            OpeningMode::RandomNoC4w | OpeningMode::BanC4w => {
+                [OpeningMode::Td, OpeningMode::Tsd][(self.next_random() % 2) as usize]
+            }
+            OpeningMode::Custom(c) => {
+                let picked: Vec<OpeningMode> = [(c.td, OpeningMode::Td), (c.tsd, OpeningMode::Tsd), (c.seed3, OpeningMode::Seed3)]
+                    .into_iter()
+                    .filter_map(|(on, m)| on.then_some(m))
+                    .collect();
+                match picked.len() {
+                    // 開幕パフェだけを選んだ時は、組めなければ今までの pco と同じく TDテンプレか開幕TSD
+                    0 if c.pco => [OpeningMode::Td, OpeningMode::Tsd][(self.next_random() % 2) as usize],
+                    // 何も選んでいなければ素の状態
+                    0 => {
+                        self.state = State::Plain(0);
+                        return;
+                    }
+                    // 1つだけなら乱数を使わない
+                    1 => picked[0],
+                    n => picked[(self.next_random() % n as u64) as usize],
+                }
+            }
             mode => mode,
         };
+        self.chose_seed3 = mode == OpeningMode::Seed3;
         self.state = State::Plain(0);
         match mode {
             OpeningMode::Tsd => {
@@ -1093,7 +1244,7 @@ fn count(board: &Board) -> u32 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// 優先テンプレを名前で
@@ -1206,6 +1357,141 @@ mod tests {
             let mut tracker = OpeningTracker::with_mode(seed, OpeningMode::RandomNoC4w);
             tracker.choose(&root, &rules);
             assert_ne!(tracker.state, State::Done, "種 {seed}");
+        }
+    }
+
+    #[test]
+    fn c4wを使わないモードは種3も攻撃された時のc4wも使わない() {
+        // 【2026-11-13・ユーザー「C4Wを禁止するモードを設けたい」】
+        assert_eq!(OpeningMode::parse("ban_c4w"), Some(OpeningMode::BanC4w));
+        let rules = Rules::ppt2();
+        let queue = [Piece::I, Piece::O, Piece::T, Piece::S, Piece::Z, Piece::J];
+        let root = Root { hold: None, queue: queue.to_vec(), ..Root::default() };
+        for seed in 1..200 {
+            let mut tracker = OpeningTracker::with_mode(seed, OpeningMode::BanC4w).with_attacked_well(true, 1);
+            assert!(tracker.bans_c4w());
+            tracker.choose(&root, &rules);
+            assert_ne!(tracker.state, State::Done, "種 {seed}: 種3C4W を選んだ");
+            // テンプレの途中で攻撃されても、C4W の形を作らず「C4W で対抗」にもしない
+            tracker.attacked = true;
+            assert!(!tracker.force_rival(), "種 {seed}");
+            assert!(!tracker.well_now(), "種 {seed}");
+        }
+        // ほかのモードは今までどおり
+        let mut other = OpeningTracker::with_mode(1, OpeningMode::RandomNoC4w).with_attacked_well(true, 1);
+        other.attacked = true;
+        assert!(!other.bans_c4w());
+        assert!(other.force_rival());
+    }
+
+    #[test]
+    fn くろみつ砲の妥協形2は使わない() {
+        // 【2026-11-14・ユーザー「くろみつ砲でパフェが望めないツモの時にSミノ・Zミノを端に置く癖があります」「はい、入れる」】
+        let raw: Vec<RawTemplate> = serde_json::from_str(include_str!("../data/td_templates.json")).unwrap();
+        let count = |name: &str, word: &str| {
+            raw.iter().find(|t| t.name == name).unwrap().forms.iter().filter(|f| f.section.contains(word)).count()
+        };
+        let kuro = all_templates().iter().find(|t| t.name == "くろみつ砲").unwrap();
+        assert!(count("くろみつ砲", "妥協形2") > 0, "データには妥協形2がある");
+        assert!(kuro.forms.iter().all(|f| !f.section.contains("妥協形2")));
+        // ほかの図(1巡目・理想形・通常形・妥協形1)は残す
+        assert_eq!(kuro.forms.len(), raw.iter().find(|t| t.name == "くろみつ砲").unwrap().forms.len() - count("くろみつ砲", "妥協形2"));
+        assert!(kuro.forms.iter().any(|f| f.section.contains("妥協形1")));
+        // ほかのテンプレはそのまま
+        let honey = all_templates().iter().find(|t| t.name == "はちみつ砲").unwrap();
+        assert_eq!(honey.forms.len(), raw.iter().find(|t| t.name == "はちみつ砲").unwrap().forms.len());
+    }
+
+    /// 実機(debug_log_20261114_135512 の1P 局2 101手目の後)のくろみつ砲2巡目の盤面。TST の壁の I(0列目)と S がまだ無い
+    pub(crate) fn kuromitsu_before_wall() -> Board {
+        Board::from_rows(&[
+            "...#......",
+            "..##..####",
+            "..##...###",
+            ".#####.###",
+            ".####..###",
+            ".#####.###",
+            "#####.####",
+        ])
+    }
+
+    #[test]
+    fn 図の最後のtを壁より先に入れる手は早すぎる手() {
+        // 【2026-11-14・ユーザー「くろみつ砲でIミノを入れずにTSTをしようとする挙動が見られました。悪手なので修正してください」】
+        let board = kuromitsu_before_wall();
+        let kuro = Arc::new(all_templates().iter().find(|t| t.name == "くろみつ砲").unwrap().as_ref().clone()).narrowed(&board);
+        assert!(kuro.consistent(&board));
+        let t = PieceLocation { piece: Piece::T, rotation: tetrisai_core::Rotation::West, x: 6, y: 2 };
+        assert_eq!(t.sorted_cells(), [(6, 1), (5, 2), (6, 2), (6, 3)]);
+        assert!(!kuro.accepts(&board, &t));
+        assert!(kuro.premature_last(&board, &t), "I と S を置く前の T は早すぎる");
+        // 壁の I と S を置いた後なら図どおり(早すぎない)
+        let mut walled = board;
+        for (x, y) in [(0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (0, 6), (1, 4), (1, 5)] {
+            walled.cols[x as usize] |= 1 << y;
+        }
+        assert!(kuro.accepts(&walled, &t));
+        assert!(!kuro.premature_last(&walled, &t));
+        // T 以外の手や、図の溝でない所の T は関係ない
+        let other = PieceLocation { piece: Piece::T, rotation: tetrisai_core::Rotation::North, x: 8, y: 7 };
+        assert!(!kuro.premature_last(&board, &other));
+    }
+
+    #[test]
+    fn 細かく選んだ開幕と中盤のc4wを読める() {
+        // 【2026-11-14・ユーザー「全自動モードにおいて目指すものの設定を詳細に切り替えられるようにしたい」】
+        let custom = |td, tsd, seed3, pco, mid_c4w| Some(OpeningMode::Custom(OpeningChoice { td, tsd, seed3, pco, mid_c4w }));
+        assert_eq!(OpeningMode::parse("td+tsd+no_mid_c4w"), custom(true, true, false, false, false));
+        assert_eq!(OpeningMode::parse("seed3+pco"), custom(false, false, true, true, true));
+        assert_eq!(OpeningMode::parse("plain"), custom(false, false, false, false, true));
+        assert_eq!(OpeningMode::parse("td+nanika"), None);
+        // 今までの名前は今までどおり
+        assert_eq!(OpeningMode::parse("td"), Some(OpeningMode::Td));
+        assert_eq!(OpeningMode::parse("ban_c4w"), Some(OpeningMode::BanC4w));
+        // 打ち方は開幕の指定から外す
+        assert_eq!(split_style("td+tsd+style=b2b"), ("td+tsd".to_string(), Some("b2b".to_string())));
+        assert_eq!(split_style("ban_c4w"), ("ban_c4w".to_string(), None));
+        assert_eq!(split_style("style=standard"), (String::new(), Some("standard".to_string())));
+    }
+
+    #[test]
+    fn 細かく選んだ開幕は選んだものだけから選ぶ() {
+        let rules = Rules::ppt2();
+        let queue = [Piece::I, Piece::O, Piece::T, Piece::S, Piece::Z, Piece::J];
+        let root = Root { hold: None, queue: queue.to_vec(), ..Root::default() };
+        // 開幕TSD と開幕C4W(種3)、中盤の C4W なし: 種3を選んだ局だけ C4W を使う
+        let mode = OpeningMode::parse("tsd+seed3+no_mid_c4w").unwrap();
+        let (mut tsd, mut seed3) = (0, 0);
+        for seed in 1..200 {
+            let mut tracker = OpeningTracker::with_mode(seed, mode).with_attacked_well(true, 1);
+            tracker.choose(&root, &rules);
+            match tracker.state {
+                State::Tsd(0) => {
+                    tsd += 1;
+                    assert!(tracker.bans_c4w(), "種 {seed}: 開幕TSD の局は C4W を使わない");
+                }
+                State::Done => {
+                    seed3 += 1;
+                    assert!(!tracker.bans_c4w(), "種 {seed}: 開幕C4W の局は C4W を使う");
+                }
+                ref s => panic!("種 {seed}: 選んでいない開幕 {s:?}"),
+            }
+            // 中盤の C4W なしでは、テンプレの途中で攻撃されても C4W に切り替えない
+            tracker.attacked = true;
+            assert!(!tracker.force_rival(), "種 {seed}");
+        }
+        assert!(tsd > 50 && seed3 > 50, "均等に選ぶ: 開幕TSD {tsd}・種3 {seed3}");
+        // 何も選ばなければ素の状態
+        let mut plain = OpeningTracker::with_mode(1, OpeningMode::parse("plain").unwrap());
+        plain.choose(&root, &rules);
+        assert_eq!(plain.state, State::Plain(0));
+        assert!(!plain.bans_c4w(), "中盤の C4W は使う");
+        // TDテンプレだけ: 開幕TSD・種3を選ばない
+        for seed in 1..50 {
+            let mut td = OpeningTracker::with_mode(seed, OpeningMode::parse("td+no_mid_c4w").unwrap());
+            td.choose(&root, &rules);
+            assert!(matches!(td.state, State::Template(_) | State::Plain(0)), "種 {seed}: {:?}", td.state);
+            assert!(td.bans_c4w());
         }
     }
 
@@ -1455,5 +1741,45 @@ mod tests {
         let full = board.full_lines();
         board.remove_lines(full);
         assert!(board.is_empty(), "パフェ: {board:?}");
+    }
+
+    #[test]
+    fn tsdの後に攻撃されたらパフェをあきらめてテンプレを終える() {
+        // 【2026-11-14・ユーザー「相手の速攻でTDパフェができなくなった場合TSDまではテンプレでその後の単発消しは解除してほしい」】
+        let rules = Rules::ppt2();
+        let honey = tpl("はちみつ砲").clone();
+        let board = Board::from_rows(&["##...#####"]);
+        let template = |clears, rise| Arc::new(Template { name: honey.name.clone(), forms: honey.forms.clone(), clears, rise, pc_after_tst: false });
+        let observe = |clears, rise, incoming: u32| {
+            let mut tracker = OpeningTracker::with_mode(1, OpeningMode::Td);
+            tracker.state = State::Template(template(clears, rise));
+            tracker.last_board = Some(board);
+            let root = Root {
+                state: PlayerState::new(board),
+                queue: vec![Piece::T, Piece::I],
+                incoming: if incoming > 0 { vec![crate::search::IncomingGarbage { lines: incoming, delay: 0 }] } else { vec![] },
+                ..Default::default()
+            };
+            matches!(tracker.observe(&root, &rules), Opening::Template(_))
+        };
+        // TSD の後(2回撃った後)は、予告かせり上がりがあれば終える
+        assert!(!observe(2, 0, 3), "予告があれば終える");
+        assert!(!observe(2, 1, 0), "せり上がった後は終える");
+        // TSD の前(TST の後)は、攻撃されてもテンプレを続ける
+        assert!(observe(1, 0, 3), "TSD まではテンプレ");
+        assert!(observe(1, 1, 0), "TSD まではテンプレ");
+        // 攻撃されていなければ、TSD の後もパフェまで続ける
+        assert!(observe(2, 0, 0));
+        // TST→パフェのテンプレは TST の後から
+        let mut tracker = OpeningTracker::with_mode(1, OpeningMode::Td);
+        tracker.state = State::Template(Arc::new(Template { pc_after_tst: true, ..template(1, 0).as_ref().clone() }));
+        tracker.last_board = Some(board);
+        let root = Root {
+            state: PlayerState::new(board),
+            queue: vec![Piece::T, Piece::I],
+            incoming: vec![crate::search::IncomingGarbage { lines: 2, delay: 0 }],
+            ..Default::default()
+        };
+        assert!(!matches!(tracker.observe(&root, &rules), Opening::Template(_)));
     }
 }

@@ -70,6 +70,8 @@ pub struct Root {
     pub strategy: Strategy,
     /// 序盤の作戦の間でも中あけ(C4W)の評価を使う(テンプレの途中で攻撃された時。`OpeningTracker::well_now`。2026-11-10)
     pub opening_well: bool,
+    /// C4W を使わない(中あけの評価・REN を切った手の減点を使わない。`OpeningTracker::bans_c4w`。2026-11-13)
+    pub no_c4w: bool,
 }
 
 impl Root {
@@ -246,8 +248,10 @@ pub fn search(
         return None;
     }
     // 【2026-11-09】早撃ちの間は、C4W 相手専用の重み一式(`Weights::rush`)があればそれで考える
-    let weights = match (&root.strategy, &weights.rush) {
-        (crate::strategy::Strategy::Rush, Some(rush)) => rush.as_ref(),
+    // 【2026-11-14】迎え撃ちの間は、迎え撃ちの重み一式(`Weights::counter`)で考える
+    let weights = match (&root.strategy, &weights.rush, &weights.counter) {
+        (crate::strategy::Strategy::Rush, Some(rush), _) => rush.as_ref(),
+        (crate::strategy::Strategy::Counter, _, Some(counter)) => counter.as_ref(),
         _ => weights,
     };
     // 【2026-11-09】開幕パフェの間は、pco.rs が選んだ位置に置く(入らなければふつうに考える)
@@ -356,9 +360,21 @@ pub fn search(
                     if off_template && !(pc_ok || (result.spin == tetrisai_core::Spin::Full && result.lines >= 2)) {
                         continue;
                     }
+                    // 【2026-11-14・ユーザー「くろみつ砲でIミノを入れずにTSTをしようとする挙動が見られました。悪手なので修正してください」】
+                    // 図の最後に入れる T が、他のミノ(TST の壁の I など)より先に来ると、図どおりの手が無くなって縛りが外れ、T を図の溝へ
+                    // 入れて消えない Tスピンを選んでいた(debug_log_20261114_135512 の1P 局2 102手目)。消えないなら溝に入れない。
+                    // 図から外れて序盤が終わった後も、I を待たずに同じ溝へ T を入れたので、消えない Tスピン(spin Full で 0行)は図に
+                    // かかわらず選ばない(溝の壁ができる前に T を使ってしまう手。T を HOLD して壁を先に作る手が残る)
+                    if result.lines == 0
+                        && mv.placement.location.piece == Piece::T
+                        && (mv.placement.spin == tetrisai_core::Spin::Full
+                            || matches!(&root.opening, Opening::Template(t) if t.premature_last(&parent.state.board, &mv.placement.location)))
+                    {
+                        continue;
+                    }
                     let mut r = parent.reward
                         + reward(weights, rules, mv, &result)
-                        + ren_cut_value(weights, parent.state.consecutive_clears, result.lines, &state.board)
+                        + if root.no_c4w { 0.0 } else { ren_cut_value(weights, parent.state.consecutive_clears, result.lines, &state.board) }
                         + rival_fire_value(weights, root.strategy, parent.state.consecutive_clears, result.lines, &parent.state.board, battle.opponent_rows)
                         + if root.opening.is_active() {
                             0.0
@@ -414,10 +430,11 @@ pub fn search(
                         opponent_rows: battle.opponent_rows,
                         opening: root.opening.is_active() && !root.opening_well,
                         strategy: root.strategy,
+                        no_c4w: root.no_c4w,
                     };
                     let score = r
                         + evaluate(weights, rules, &state.board, state.back_to_back, &ctx)
-                        + battle_value(weights, &battle, outgoing, chunk, our_top);
+                        + battle_value(weights, &battle, outgoing, chunk, our_top, consumed - risen);
                     nodes += 1;
 
                     let first = if depth == 0 { u32::MAX } else { parent.first };
@@ -529,10 +546,11 @@ pub fn search(
                         opponent_rows: battle.opponent_rows,
                             opening: root.opening.is_active() && !root.opening_well,
                             strategy: root.strategy,
+                            no_c4w: root.no_c4w,
                         };
                         let s = node.reward
                             + reward(weights, rules, mv, &result)
-                            + ren_cut_value(weights, node.state.consecutive_clears, result.lines, &state.board)
+                            + if root.no_c4w { 0.0 } else { ren_cut_value(weights, node.state.consecutive_clears, result.lines, &state.board) }
                             + rival_fire_value(weights, root.strategy, node.state.consecutive_clears, result.lines, &node.state.board, battle.opponent_rows)
                             + if root.opening.is_active() {
                                 0.0
@@ -545,7 +563,7 @@ pub fn search(
                                 )
                             }
                             + evaluate(weights, rules, &state.board, state.back_to_back, &ctx)
-                            + battle_value(weights, &battle, outgoing, chunk, our_top);
+                            + battle_value(weights, &battle, outgoing, chunk, our_top, consumed - risen);
                         nodes += 1;
                         best = best.max(s);
                     }
@@ -643,6 +661,81 @@ mod tests {
         let first = r.candidates[0].mv.placement;
         assert_eq!(first.location.piece, Piece::T);
         assert_eq!(first.spin, Spin::Full, "{:?}", r.candidates[0]);
+    }
+
+    #[test]
+    fn テンプレのtstの壁ができる前にtを溝へ入れない() {
+        // 【2026-11-14・ユーザー「くろみつ砲でIミノを入れずにTSTをしようとする挙動が見られました。悪手なので修正してください」】
+        // 実機(debug_log_20261114_135512 の1P 局2 102手目)では、操作ミノ T・HOLD O・次 O I O S Z で、0列目の I より先に
+        // T を TST の溝へ入れ、1行も消えない Tスピンにしていた
+        let board = crate::opening::tests::kuromitsu_before_wall();
+        let kuro = std::sync::Arc::new(crate::opening::all_templates().iter().find(|t| t.name == "くろみつ砲").unwrap().as_ref().clone()).narrowed(&board);
+        let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/weights/b2b.toml")).unwrap();
+        let weights: Weights = toml::from_str(&text).unwrap();
+        let root = Root {
+            state: PlayerState::new(board),
+            hold: Some(Piece::O),
+            queue: vec![Piece::T, Piece::O, Piece::I, Piece::O, Piece::S, Piece::Z],
+            opening: Opening::Template(kuro),
+            ..Default::default()
+        };
+        for width in [8, 64, 512] {
+            let options = SearchOptions { width, max_depth: 6, speculate: false };
+            let r = search(&root, &options, &weights, &Rules::ppt2(), &|| false).expect("手がある");
+            let mut state = root.state;
+            let result = state.apply(&r.candidates[0].mv.placement, &Rules::ppt2());
+            let first = r.candidates[0].mv.placement;
+            assert!(
+                !(first.location.piece == Piece::T && result.lines == 0 && first.spin == Spin::Full),
+                "幅{width}: 消えない Tスピン {first:?}"
+            );
+            assert_ne!(first.location.sorted_cells(), [(6, 1), (5, 2), (6, 2), (6, 3)], "幅{width}: 壁の前に T を溝へ入れた");
+            // 読み筋の中でも、消えない Tスピンは選ばない
+            let mut st = root.state;
+            for m in &r.plan {
+                let p = m.placement;
+                let res = st.apply(&p, &Rules::ppt2());
+                assert!(!(p.location.piece == Piece::T && p.spin == Spin::Full && res.lines == 0), "幅{width}: 読み筋 {:?}", r.plan);
+            }
+        }
+    }
+
+    #[test]
+    fn b2bの重みはb2bが切れていてもtsdの溝を掘りrenで崩さない() {
+        // 【2026-11-14・ユーザー「C4W以外の盤面においてTSDのドネイトが出来上がっているが掘りRENで消化する癖がある」】
+        // 実機(13:00 の1局目66手目)の局面。B2B が切れていると、TSD の点(1.43)が掘って穴・高さを減らす盤面の点の差より小さく、
+        // T を縦に置いて単発で消し、掘り REN を選んでいた。b2b.toml の TSD の点を 8 にして TSD を選ぶようにした
+        let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/weights/b2b.toml")).unwrap();
+        let weights: Weights = toml::from_str(&text).unwrap();
+        let board = Board::from_rows(&[
+            "#.........",
+            "####...###",
+            "#####..###",
+            "####...###",
+            "#####.####",
+            "#########.",
+            "#######.##",
+            "####.#####",
+            "####.#####",
+            "####.#####",
+            "####.#####",
+            "####.#####",
+        ]);
+        let mut state = PlayerState::new(board);
+        state.back_to_back = false;
+        let root = Root {
+            state,
+            hold: Some(Piece::Z),
+            queue: vec![Piece::T, Piece::S, Piece::L, Piece::I, Piece::J, Piece::Z],
+            ..Default::default()
+        };
+        // 実機は思考を待たずに浅い探索(幅 8〜64)の手を使うことが多い。幅 128・256 ではまだ単発を選ぶ(点 8 は境目に近い)
+        for width in [8, 64, 1024] {
+            let options = SearchOptions { width, max_depth: 6, speculate: false };
+            let r = search(&root, &options, &weights, &Rules::ppt2(), &|| false).expect("手がある");
+            let first = r.candidates[0].mv.placement;
+            assert_eq!((first.location.piece, first.spin), (Piece::T, Spin::Full), "幅{width}: {:?}", r.candidates[0]);
+        }
     }
 
     #[test]

@@ -54,7 +54,9 @@ cargo build --release -p tetrisai-bot
 target/release/tetrisai-bot.exe --config config/weights/run16.toml --opening no_c4w
 ```
 
-`--opening` の値は `default`・`random`・`no_c4w`(開幕C4Wを除く)・`td`・`tsd`・`seed3`・`pco`(開幕パフェ)です。ほかのオプションは `crates/bot/src/main.rs` の先頭に書いてあります。
+`--opening` の値は `default`・`random`・`no_c4w`(開幕C4Wを除く)・`td`・`tsd`・`seed3`・`pco`(開幕パフェ)・`ban_c4w`(開幕も中盤も C4W を組まない。相手の C4W には早撃ちで答える)です。
+
+細かく選ぶ時は「`td+tsd+seed3+pco`」のように開幕を `+` でつなぎます(対局ごとに均等に選ぶ。`pco` は組める見込みがあれば先に狙う。何も選ばない時は `plain`)。`no_mid_c4w` を足すと中盤も C4W を使いません(開幕C4W を選んだ局を除く)。`style=名前` を足すと、`--config` と同じフォルダの `styles.toml` で引いた重み(`standard` は run16、`b2b` は B2B 重視)を `--config` の代わりに読みます(例: `--opening td+tsd+no_mid_c4w+style=b2b`)。ほかのオプションは `crates/bot/src/main.rs` の先頭に書いてあります。
 
 TBA で使うプラグインは [Releases](https://github.com/fiss-vinbows/Tetris-KasugAI/releases) にあります。
 

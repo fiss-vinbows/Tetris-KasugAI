@@ -7,6 +7,28 @@ use tetrisai_engine::{search, IncomingGarbage, OpeningTracker, Opponent, Root, S
 
 use crate::battle::{Incoming, Player};
 
+/// 作戦ごとの手数(エージェントの名前ごと。[通常, C4Wで対抗, 早撃ち, 迎え撃ち])。arena の最後に書く(2026-11-14。
+/// 迎え撃ちが本当に使われたかを確かめるため)
+pub static STRATEGY_MOVES: std::sync::Mutex<Vec<(String, [u64; 4])>> = std::sync::Mutex::new(Vec::new());
+
+fn note_strategy(label: &str, strategy: tetrisai_engine::Strategy) {
+    let i = match strategy {
+        tetrisai_engine::Strategy::Normal => 0,
+        tetrisai_engine::Strategy::C4WRival => 1,
+        tetrisai_engine::Strategy::Rush => 2,
+        tetrisai_engine::Strategy::Counter => 3,
+    };
+    let mut all = STRATEGY_MOVES.lock().unwrap();
+    match all.iter_mut().find(|(l, _)| l == label) {
+        Some((_, c)) => c[i] += 1,
+        None => {
+            let mut c = [0; 4];
+            c[i] = 1;
+            all.push((label.to_string(), c));
+        }
+    }
+}
+
 /// 毎手、考える前に渡す対戦の状況。
 pub struct BattleView<'a> {
     /// 自分への予告
@@ -126,6 +148,7 @@ impl EngineAgent {
         if let (Some(tracker), Some(root)) = (self.opening.as_mut(), self.root.as_mut()) {
             root.opening = tracker.observe(root, &self.rules);
             root.opening_well = tracker.well_now();
+            root.no_c4w = tracker.bans_c4w();
         }
     }
 }
@@ -187,6 +210,13 @@ impl Agent for EngineAgent {
             if self.opening.as_ref().is_some_and(|t| t.suppress_rival()) && root.strategy != tetrisai_engine::Strategy::Normal {
                 root.strategy = tetrisai_engine::Strategy::Normal;
             }
+            // 【2026-11-13】C4W を使わないモードでは、相手の C4W に「早撃ち」で答える(bot と同じ)
+            if self.opening.as_ref().is_some_and(|t| t.bans_c4w()) && root.strategy == tetrisai_engine::Strategy::C4WRival {
+                root.strategy = tetrisai_engine::Strategy::Rush;
+            }
+            // 【2026-11-14】迎え撃ちの重み一式があれば、早撃ちの代わりに迎え撃ち(bot と同じ)
+            root.strategy = root.strategy.with_counter(self.weights.counter.is_some());
+            note_strategy(&self.label, root.strategy);
             if let Some(tracker) = self.opening.as_mut() {
                 if tracker.pivot_if_opponent_c4w(&o.state.board, self.weights.pivot_opening_rows) {
                     root.opening = tetrisai_engine::Opening::None;

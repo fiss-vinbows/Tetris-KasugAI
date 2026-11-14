@@ -23,6 +23,9 @@
 //!   `.toml` はこのAIの重み。TBA は `config/cold_clear_beginner.json` を渡してくる。
 //!   読めない・形式が違う・知らない項目がある重みは、理由を標準エラーに書いて終了する(終了コード 2)。
 //!   以前は既定の重みで動き続けたため、別の重みで動いていることに気づけなかった
+//! - `--opening <指定>`: 開幕に目指すもの。`random`・`td` などの名前か、「td+tsd+seed3+pco+no_mid_c4w」のように
+//!   「+」でつないだ細かい指定(`OpeningChoice`)。`style=名前` を混ぜると、`--config` と同じフォルダの `styles.toml` で
+//!   その名前の重みのファイルを引き、`--config` の代わりに読む(TBA の全自動の設定の「打ち方」。2026-11-14)
 //! - `--max-width <数>`: 探索の幅の上限(既定 1024)
 //! - `--no-opening`: 序盤の作戦(TD系テンプレか素の状態を対局ごとにランダムで選ぶ。設計書 8.10)を使わない
 //! - `--speculate`: 見えているミノの先を1手予測して読む(計算が6〜7割増える。同じ幅では勝率57%で
@@ -85,7 +88,20 @@ impl Bot {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let weights = load_weights(arg_value(&args, "--config")).unwrap_or_else(|e| {
+    // 【2026-11-14・ユーザー「全自動モードにおいて目指すものの設定を詳細に切り替えられるようにしたい」】
+    // 打ち方(style=名前)があれば、styles.toml で引いた重みを --config の代わりに読む
+    let (opening_spec, style) = arg_value(&args, "--opening").map_or((None, None), |s| {
+        let (rest, style) = tetrisai_engine::split_style(s);
+        (Some(rest), style)
+    });
+    let config = match &style {
+        Some(name) => Some(style_weights(arg_value(&args, "--config"), name).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(2);
+        })),
+        None => arg_value(&args, "--config").map(String::from),
+    };
+    let weights = load_weights(config.as_deref()).unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(2);
     });
@@ -96,7 +112,7 @@ fn main() {
     let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
     // 【2026-11-05・ユーザー】全自動の設定で開幕に目指すものを選ぶ(--opening default|random|td|tsd|seed3|pco)
     // 【2026-11-09】pco: 開幕パフェ(見込みが低ければ TDテンプレか開幕TSD。C4W の相手が REN を始める前に10行届ける)
-    let mode = match arg_value(&args, "--opening") {
+    let mode = match opening_spec.as_deref().filter(|s| !s.is_empty()) {
         Some(s) => OpeningMode::parse(s).unwrap_or_else(|| {
             eprintln!("--opening の値が分かりません: {s}");
             std::process::exit(1);
@@ -113,7 +129,19 @@ fn main() {
         if let Some(tracker) = opening.as_mut() {
             root.opening = tracker.observe(root, &rules);
             root.opening_well = tracker.well_now();
+            root.no_c4w = tracker.bans_c4w();
         }
+    };
+    // 【2026-11-13・ユーザー「C4Wを禁止するモードを設けたい」】C4W を使わないモード(--opening ban_c4w)では、
+    // 相手の C4W に「C4W で対抗」せず「早撃ち」で答える
+    // 【2026-11-14・ユーザー「間に合わない場合は火力をため込んで相殺して迎え撃つ方針を考えたい」】迎え撃ちの重み一式([counter])が
+    // あれば、早撃ちの代わりに迎え撃ちにする
+    let has_counter = weights.counter.is_some();
+    let ban_rival = |opening: &Option<OpeningTracker>, root: &mut Root| {
+        if opening.as_ref().is_some_and(|t| t.bans_c4w()) && root.strategy == tetrisai_engine::Strategy::C4WRival {
+            root.strategy = tetrisai_engine::Strategy::Rush;
+        }
+        root.strategy = root.strategy.with_counter(has_counter);
     };
     // 【2026-11-03・ユーザー】作戦層: 相手の盤面(battle で受け取る。全自動だけ)を見て、C4W で対抗するか早撃ちするかを選ぶ
     let (c4w_response, pivot_opening_rows) = (weights.c4w_response, weights.pivot_opening_rows);
@@ -170,6 +198,7 @@ fn main() {
                     if opening.as_ref().is_some_and(|t| t.suppress_rival()) && root.strategy != tetrisai_engine::Strategy::Normal {
                         root.strategy = tetrisai_engine::Strategy::Normal;
                     }
+                    ban_rival(&opening, &mut root);
                     let mut s = bot.shared.lock().unwrap();
                     s.pending_start = root.queue.is_empty();
                     s.root = Some(root);
@@ -230,6 +259,7 @@ fn main() {
                     if opening.as_ref().is_some_and(|t| t.suppress_rival()) && root.strategy != tetrisai_engine::Strategy::Normal {
                         root.strategy = tetrisai_engine::Strategy::Normal;
                     }
+                    ban_rival(&opening, root);
                     // 【2026-11-07・ユーザー「相手の C4W になすすべなく負ける」】相手の C4W が育ってきたら序盤を切り上げて対抗する
                     if let (Some(tracker), Some(o)) = (opening.as_mut(), root.opponent.as_ref()) {
                         if tracker.pivot_if_opponent_c4w(&o.board, pivot_opening_rows) {
@@ -450,6 +480,19 @@ fn arg_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(|s| s.as_str())
 }
 
+/// 打ち方の名前(`--opening` の `style=名前`)から、重みのファイルの場所を引く(2026-11-14)。
+/// `--config` と同じフォルダの `styles.toml`(「名前 = "ファイル名"」)を読む。知らない名前・読めない時はエラー。
+fn style_weights(config: Option<&str>, name: &str) -> Result<String, String> {
+    let config = config.ok_or_else(|| format!("打ち方 {name} を選ぶには --config で重みのフォルダを渡してください"))?;
+    let dir = Path::new(config).parent().unwrap_or(Path::new("."));
+    let path = dir.join("styles.toml");
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("打ち方の表を読めません: {}: {e}", path.display()))?;
+    let table: std::collections::HashMap<String, String> =
+        toml::from_str(&text).map_err(|e| format!("打ち方の表の形式が違います: {}: {e}", path.display()))?;
+    let file = table.get(name).ok_or_else(|| format!("打ち方 {name} が {} にありません", path.display()))?;
+    Ok(dir.join(file).to_string_lossy().into_owned())
+}
+
 /// 評価の重みを読む。指定が無ければ既定値。
 ///
 /// 【2026-11-01・ユーザーの指示】読めない・形式が違う・知らない項目がある重みはエラーにする(呼び出し側で終了する)。
@@ -545,6 +588,25 @@ mod tests {
         assert!(load_weights(dir.join("no-such.toml").to_str()).is_err());
         // 指定が無ければ既定値
         assert_eq!(load_weights(None).unwrap(), Weights::default());
+    }
+
+    #[test]
+    fn 打ち方の名前から重みのファイルを引く() {
+        // 【2026-11-14・ユーザー「全自動モードにおいて目指すものの設定を詳細に切り替えられるようにしたい」】
+        let dir = std::env::temp_dir().join("tetrisai-bot-test-style");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("styles.toml"), "standard = \"a.toml\"\nb2b = \"b.toml\"\n").unwrap();
+        let config = dir.join("a.toml");
+        let got = style_weights(config.to_str(), "b2b").unwrap();
+        assert_eq!(Path::new(&got), dir.join("b.toml"));
+        assert!(style_weights(config.to_str(), "nanika").unwrap_err().contains("nanika"));
+        assert!(style_weights(None, "b2b").is_err(), "--config が無ければフォルダが分からない");
+        // 実際の表: どの打ち方も、読める重みのファイルを指している
+        let real = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/weights/run16.toml");
+        for name in ["standard", "b2b"] {
+            let path = style_weights(real.to_str(), name).unwrap();
+            load_weights(Some(&path)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
     }
 
     #[test]

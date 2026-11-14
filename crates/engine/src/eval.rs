@@ -204,6 +204,17 @@ pub struct Weights {
     /// 早撃ちの間だけ使う重み一式(C4W 相手専用。設定ファイルの [rush] の表)。無ければこの重みのまま
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rush: Option<Box<Weights>>,
+
+    // ---- 迎え撃ち(2026-11-14・strategy.rs の `Strategy::Counter`。既定値は0) ----
+    /// 「迎え撃ち」のとき、自分への予告を打ち消した攻撃1行あたり
+    #[serde(default)]
+    pub counter_cancel: f32,
+    /// 「迎え撃ち」のとき、相手に届いた攻撃(打ち消しに使わなかった分)1行あたり(負なら、予告が来るまで撃たずにためる)
+    #[serde(default)]
+    pub counter_sent: f32,
+    /// 迎え撃ちの間だけ使う重み一式(設定ファイルの [counter] の表)。あれば、相手の C4W に間に合わない時に早撃ちの代わりに使う
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counter: Option<Box<Weights>>,
 }
 
 /// 盤面の評価に渡す、局面ごとの値。
@@ -221,6 +232,8 @@ pub struct EvalContext {
     pub opening: bool,
     /// 作戦層の作戦(strategy.rs)
     pub strategy: Strategy,
+    /// C4W を使わない(中あけの項目を使わない。`Root::no_c4w`。2026-11-13)
+    pub no_c4w: bool,
 }
 
 /// 相手の情報から作る、評価に使う値(探索の最初に1回だけ計算する)。
@@ -344,6 +357,9 @@ impl Default for Weights {
             rush_ren_overflow: 0.0,
             rush_finish: 0.0,
             rush: None,
+            counter_cancel: 0.0,
+            counter_sent: 0.0,
+            counter: None,
         }
     }
 }
@@ -405,7 +421,8 @@ pub fn evaluate(w: &Weights, rules: &Rules, board: &Board, back_to_back: bool, c
     }
     // 【2026-11-01・ユーザー】いきなり REN を組むのは対策されると弱いので、序盤は中あけの項目を使わない
     // 【2026-11-03・ユーザー】作戦層の「早撃ち」では C4W を組まない
-    if !ctx.opening && ctx.strategy != Strategy::Rush {
+    // 【2026-11-13・ユーザー「C4Wを禁止するモードを設けたい」】C4W を使わないモードでも組まない
+    if !ctx.opening && !ctx.no_c4w && !ctx.strategy.avoids_c4w() {
         e += center_well_value(w, rules, board, ctx);
         if ctx.strategy == Strategy::C4WRival && w.rival_ren != 0.0 {
             e += w.rival_ren * ren_potential(rules, board, ctx.consecutive_clears) as f32;
@@ -580,8 +597,12 @@ pub fn ren_potential(rules: &Rules, board: &Board, consecutive_clears: u32) -> u
 /// 対戦の駆け引きの評価。`outgoing` はこの局面までに相手に届く攻撃(相殺に使った分を除く)、
 /// `our_top` は自分の盤面の高さ(予告の分を上乗せしたもの)。
 /// `chunk` はこの局面までに1回にまとめて届く攻撃の最大(REN 中にためてまとめて送る分。自分への予告の相殺を除く)。
-pub fn battle_value(w: &Weights, ctx: &BattleContext, outgoing: u32, chunk: u32, our_top: u32) -> f32 {
+/// `cancelled` はこの局面までに自分への予告を打ち消した攻撃の行数(迎え撃ちで使う)。
+pub fn battle_value(w: &Weights, ctx: &BattleContext, outgoing: u32, chunk: u32, our_top: u32, cancelled: u32) -> f32 {
     let mut v = w.attack_sent * outgoing as f32;
+    if ctx.strategy == Strategy::Counter {
+        v += w.counter_cancel * cancelled as f32 + w.counter_sent * outgoing as f32;
+    }
     if ctx.strategy == Strategy::Rush {
         v += w.rush_attack * outgoing as f32;
         v += w.rush_height * our_top as f32;
@@ -726,12 +747,42 @@ mod tests {
         let w = Weights::default();
         // 相手は17段(余裕3段)。4行届けばとどめ、2行では足りない
         let ctx = BattleContext { opponent_danger: Some(17), ..Default::default() };
-        let lethal = battle_value(&w, &ctx, 4, 4, 5);
-        let not = battle_value(&w, &ctx, 2, 2, 5);
+        let lethal = battle_value(&w, &ctx, 4, 4, 5, 0);
+        let not = battle_value(&w, &ctx, 2, 2, 5, 0);
         assert!(lethal - not > w.lethal * 0.9, "{lethal} {not}");
         // 相手の情報が無ければ、届く攻撃の点(既定 0)だけ
         let none = BattleContext::default();
-        assert_eq!(battle_value(&w, &none, 4, 4, 5), 0.0);
+        assert_eq!(battle_value(&w, &none, 4, 4, 5, 0), 0.0);
+    }
+
+    #[test]
+    fn 迎え撃ちは打ち消した行と届いた行に点を付ける() {
+        // 【2026-11-14・ユーザー「火力をため込んで相殺して迎え撃つ」】
+        let w = Weights { counter_cancel: 2.0, counter_sent: -0.5, ..Weights::default() };
+        let counter = BattleContext { strategy: Strategy::Counter, ..Default::default() };
+        assert_eq!(battle_value(&w, &counter, 4, 4, 5, 3), 2.0 * 3.0 - 0.5 * 4.0);
+        // ほかの作戦では使わない
+        let normal = BattleContext::default();
+        assert_eq!(battle_value(&w, &normal, 4, 4, 5, 3), 0.0);
+        // 迎え撃ちの重み一式([counter] の表)を読める
+        let text = "c4w_response = 0
+[counter]
+counter_cancel = 1.5
+tsd_stock = 1.0
+";
+        let parsed: Weights = toml::from_str(text).unwrap();
+        let table = parsed.counter.expect("[counter] の表");
+        assert_eq!((table.counter_cancel, table.tsd_stock), (1.5, 1.0));
+    }
+
+    #[test]
+    fn 迎え撃ちでは中あけを組まない() {
+        let rules = Rules::ppt2();
+        let well = Board::from_rows(&["###....###"; 6]);
+        let w = Weights { center_well_rows: 5.0, ..Weights::default() };
+        let eval = |strategy| evaluate(&w, &rules, &well, false, &EvalContext { strategy, ..Default::default() });
+        assert!(eval(Strategy::Normal) > eval(Strategy::Counter), "通常は中あけに加点する");
+        assert_eq!(eval(Strategy::Counter), eval(Strategy::Rush), "迎え撃ちは早撃ちと同じく中あけを見ない");
     }
 
     #[test]
@@ -749,8 +800,8 @@ mod tests {
             strategy: Strategy::Rush,
             ..Default::default()
         };
-        assert_eq!(battle_value(&w, &ctx, 6, 6, 0), 10.0, "6行まとめてなら届く");
-        assert_eq!(battle_value(&w, &ctx, 6, 4, 0), 0.0, "4行ずつでは打ち消される");
+        assert_eq!(battle_value(&w, &ctx, 6, 6, 0, 0), 10.0, "6行まとめてなら届く");
+        assert_eq!(battle_value(&w, &ctx, 6, 4, 0, 0), 0.0, "4行ずつでは打ち消される");
     }
 
     #[test]
@@ -799,6 +850,17 @@ mod tests {
         // 左右の差は中あけの行があるときだけ数える
         assert!((gain(&["###.......", "###....###", "###....###"]) - 1.5).abs() < 1e-4, "左右の差1段で −0.5");
         assert_eq!(gain(&["###.......", "#########."]), 0.0, "中あけが無ければ左右の差も数えない");
+    }
+
+    #[test]
+    fn c4wを使わないモードでは中あけを評価しない() {
+        // 【2026-11-13・ユーザー「C4Wを禁止するモードを設けたい」】
+        let w = Weights { center_well_rows: 1.0, center_well_seed: 4.0, ..Weights::default() };
+        let ban = EvalContext { t_available: 1, no_c4w: true, ..Default::default() };
+        let b = Board::from_rows(&["###....###", "###.######"]);
+        assert_eq!(evaluate(&w, &rules(), &b, false, &ban), evaluate(&Weights::default(), &rules(), &b, false, &ban));
+        let normal = EvalContext { t_available: 1, ..Default::default() };
+        assert!(evaluate(&w, &rules(), &b, false, &normal) > evaluate(&Weights::default(), &rules(), &b, false, &normal));
     }
 
     #[test]
@@ -960,7 +1022,8 @@ mod tests {
         let mut count = 0;
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
-            if path.extension().is_some_and(|e| e == "toml") {
+            // styles.toml は打ち方の名前 → 重みのファイルの表で、重みではない(2026-11-14)
+            if path.extension().is_some_and(|e| e == "toml") && !path.ends_with("styles.toml") {
                 let text = std::fs::read_to_string(&path).unwrap();
                 toml::from_str::<Weights>(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
                 count += 1;

@@ -42,7 +42,7 @@ use tetrisai_core::Rules;
 use tetrisai_engine::{OpeningMode, OpeningTracker, Weights};
 
 /// 調整する重みの名前(Weights のフィールド。配列は [添字])。
-const NAMES: [&str; 54] = [
+const NAMES: [&str; 59] = [
     "cell_coveredness",
     "holes",
     "row_transitions",
@@ -97,6 +97,14 @@ const NAMES: [&str; 54] = [
     "rush_height",
     "rush_ren_overflow",
     "rush_finish",
+    // 【2026-11-14】迎え撃ち(`--counter-profile` で迎え撃ちの重み一式に入れる)
+    "counter_cancel",
+    "counter_sent",
+    // 【2026-11-14・ユーザー「あと1手積み込むとテトリス消しになるのにREN重視で3列消しすることがあります」】REN を切る手の減点
+    // (2026-11-07 に手で -20 にした)と、TSD の溝をためる・予告が無いのに撃つ手の点(迎え撃ちで使う)も動かせるようにする
+    "ren_cut",
+    "tsd_stock",
+    "tsd_low_fire",
 ];
 
 fn get_params(w: &Weights) -> Vec<f64> {
@@ -155,6 +163,11 @@ fn get_params(w: &Weights) -> Vec<f64> {
         w.rush_height,
         w.rush_ren_overflow,
         w.rush_finish,
+        w.counter_cancel,
+        w.counter_sent,
+        w.ren_cut,
+        w.tsd_stock,
+        w.tsd_low_fire,
     ];
     v.iter().map(|&x| x as f64).collect()
 }
@@ -206,12 +219,27 @@ fn set_params(w: &mut Weights, v: &[f64]) {
     w.rush_height = f(51);
     w.rush_ren_overflow = f(52);
     w.rush_finish = f(53);
+    w.counter_cancel = f(54);
+    w.counter_sent = f(55);
+    w.ren_cut = f(56);
+    w.tsd_stock = f(57);
+    w.tsd_low_fire = f(58);
 }
 
-/// 調整した値 `theta` から重みを作る。`rush_profile` なら、早撃ちの間だけ使う重み一式(`Weights::rush`)に入れる(2026-11-09)
-fn build(base: &Weights, theta: &[f64], rush_profile: bool) -> Weights {
+/// 調整した値 `theta` から重みを作る。`rush_profile` なら、早撃ちの間だけ使う重み一式(`Weights::rush`)に入れる(2026-11-09)。
+/// `counter_profile` なら、迎え撃ちの間だけ使う重み一式(`Weights::counter`)に入れる(2026-11-14)
+fn build(base: &Weights, theta: &[f64], rush_profile: bool, counter_profile: bool) -> Weights {
     let mut w = base.clone();
-    if rush_profile {
+    if counter_profile {
+        let mut r = base.counter.as_deref().cloned().unwrap_or_else(|| {
+            let mut r = base.clone();
+            r.rush = None;
+            r.counter = None;
+            r
+        });
+        set_params(&mut r, theta);
+        w.counter = Some(Box::new(r));
+    } else if rush_profile {
         let mut r = base.rush.as_deref().cloned().unwrap_or_else(|| {
             let mut r = base.clone();
             r.rush = None;
@@ -258,6 +286,8 @@ fn main() {
     // 【2026-11-09】--rush-profile: 早撃ちの間だけ使う重み一式を調整する(ふだんの重みは変えない)。
     // --only a,b,c: 名前を挙げた重みだけ動かす。--vs-opening: 相手の開幕を固定する(既定は3組のうち2組が seed3)
     let rush_profile = args.iter().any(|a| a == "--rush-profile");
+    // 【2026-11-14・ユーザー「間に合わない場合は火力をため込んで相殺して迎え撃つ方針」】--counter-profile: 迎え撃ちの間だけ使う重み一式を調整する
+    let counter_profile = args.iter().any(|a| a == "--counter-profile");
     let only: Option<Vec<String>> = get("--only").map(|s| s.split(',').map(|x| x.trim().to_string()).collect());
     if let Some(only) = &only {
         for n in only {
@@ -284,7 +314,13 @@ fn main() {
         None => Weights::default(),
     };
     // ずらし幅の基準(最初の値の大きさ。0 に近い重みも動けるよう下限を付ける)
-    let start_params = if rush_profile { get_params(base.rush.as_deref().unwrap_or(&base)) } else { get_params(&base) };
+    let start_params = if counter_profile {
+        get_params(base.counter.as_deref().unwrap_or(&base))
+    } else if rush_profile {
+        get_params(base.rush.as_deref().unwrap_or(&base))
+    } else {
+        get_params(&base)
+    };
     let scale: Vec<f64> = start_params.iter().map(|x| x.abs().max(0.5)).collect();
     let movable: Vec<bool> = NAMES.iter().map(|n| only.as_ref().is_none_or(|o| o.iter().any(|x| x == n))).collect();
 
@@ -318,8 +354,8 @@ fn main() {
         let delta: Vec<f64> =
             (0..NAMES.len()).map(|i| if rng.gen::<bool>() { 1.0 } else { -1.0 } * if movable[i] { 1.0 } else { 0.0 }).collect();
         let shift: Vec<f64> = (0..NAMES.len()).map(|i| c * scale[i] * delta[i]).collect();
-        let plus = build(&base, &theta.iter().zip(&shift).map(|(t, s)| t + s).collect::<Vec<_>>(), rush_profile);
-        let minus = build(&base, &theta.iter().zip(&shift).map(|(t, s)| t - s).collect::<Vec<_>>(), rush_profile);
+        let plus = build(&base, &theta.iter().zip(&shift).map(|(t, s)| t + s).collect::<Vec<_>>(), rush_profile, counter_profile);
+        let minus = build(&base, &theta.iter().zip(&shift).map(|(t, s)| t - s).collect::<Vec<_>>(), rush_profile, counter_profile);
 
         // 同じミノ列で手番を入れ替えた2局を1組にする
         let first_seed = 1_000_000 + (k * games) as u64 + seed_offset * 100_000_000;
@@ -404,10 +440,10 @@ fn main() {
             );
         }
         if k % 25 == 0 {
-            save(&out, k, &build(&base, &theta, rush_profile), &theta);
+            save(&out, k, &build(&base, &theta, rush_profile, counter_profile), &theta);
         }
     }
-    save(&out, k, &build(&base, &theta, rush_profile), &theta);
+    save(&out, k, &build(&base, &theta, rush_profile, counter_profile), &theta);
     println!("終了: 反復 {k}、経過 {:.1} 時間", started.elapsed().as_secs_f64() / 3600.0);
 }
 

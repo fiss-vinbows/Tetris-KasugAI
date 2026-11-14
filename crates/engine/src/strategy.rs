@@ -39,6 +39,11 @@ pub enum Strategy {
     C4WRival,
     /// TSD・テトリスを早く撃って、相手に C4W を組ませない
     Rush,
+    /// 迎え撃ち: 火力(TSD の溝・テトリスの縦穴)をためておき、相手の REN の攻撃が予告に来たら撃って打ち消す。C4W は組まない。
+    /// 【2026-11-14・ユーザー「相手が中盤でC4Wを積み込む際に自分も合わせて積み込むのは相手の発火が早くて間に合わないことが
+    /// あります。間に合わない場合は火力をため込んで相殺して迎え撃つ方針を考えたい」】重み一式 `Weights::counter` がある時だけ、
+    /// 早撃ちの代わりに使う(`with_counter`)
+    Counter,
 }
 
 impl Strategy {
@@ -58,7 +63,18 @@ impl Strategy {
             Strategy::Normal => "通常",
             Strategy::C4WRival => "C4Wで対抗",
             Strategy::Rush => "早撃ち",
+            Strategy::Counter => "迎え撃ち",
         }
+    }
+
+    /// 迎え撃ちの重み一式(`Weights::counter`)があれば、早撃ちの代わりに迎え撃ちにする。
+    pub fn with_counter(self, counter: bool) -> Self {
+        if counter && self == Strategy::Rush { Strategy::Counter } else { self }
+    }
+
+    /// C4W を組まない作戦か(早撃ち・迎え撃ち)。
+    pub fn avoids_c4w(self) -> bool {
+        matches!(self, Strategy::Rush | Strategy::Counter)
     }
 }
 
@@ -139,6 +155,17 @@ mod tests {
         assert_eq!(decide(&Board::from_rows(&["####..####"; 2]), Some(&c4w(9))), (Strategy::Rush, 10, 0));
         assert_eq!(decide(&c4w(1), Some(&c4w(9))).0, Strategy::Rush, "自分の C4W が小さすぎる");
         assert_eq!(decide(&c4w(3), Some(&c4w(12))).0, Strategy::C4WRival, "育てた C4W は早撃ちで埋めない");
+    }
+
+    #[test]
+    fn 迎え撃ちの重みがあれば早撃ちの代わりに迎え撃ち() {
+        // 【2026-11-14・ユーザー「間に合わない場合は火力をため込んで相殺して迎え撃つ方針を考えたい」】
+        assert_eq!(Strategy::Rush.with_counter(true), Strategy::Counter);
+        assert_eq!(Strategy::Rush.with_counter(false), Strategy::Rush);
+        assert_eq!(Strategy::C4WRival.with_counter(true), Strategy::C4WRival, "間に合う時は C4W で対抗のまま");
+        assert_eq!(Strategy::Normal.with_counter(true), Strategy::Normal);
+        assert!(Strategy::Counter.avoids_c4w() && Strategy::Rush.avoids_c4w() && !Strategy::C4WRival.avoids_c4w());
+        assert_eq!(Strategy::Counter.label(), "迎え撃ち");
     }
 
     #[test]

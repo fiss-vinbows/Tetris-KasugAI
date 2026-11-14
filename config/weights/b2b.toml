@@ -1,0 +1,182 @@
+# 【2026-11-14・ユーザー「C4W以外の盤面においてTSDのドネイトが出来上がっているが掘りRENで消化する癖がある」「8 にする」】
+# B2B が切れている時、TSD の点(spin_clears[2]=1.43)が掘って穴・高さを減らす盤面の点の差より小さく、T を単発に使って掘り REN を
+# 選んでいた(B2B 中は B2B を切る減点 -8 があるので TSD を選ぶ)。ふだんの重みの spin_clears[2] を 1.43→8 にした([counter] は元のまま)。
+# 対 run16(1000局・種 64000、こちら td): td 55.6→53.9%・seed3 24.4→25.0%・tsd 46.7→44.9%(合計 -2.9、誤差の範囲ぎりぎり)。
+# 1局あたり TSD 1.86→3.03(td 相手)・B2B 2.51→3.17。経過は records/counter/tsd/result.txt、前の重みは records/counter/tsd/b2b_before_tsd8.toml
+# 【2026-11-14・ユーザー「相手が中盤でC4Wを積み込む際に…間に合わない場合は火力をため込んで相殺して迎え撃つ方針を考えたい」
+#  「あと1手積み込むとテトリス消しになるのにREN重視で3列消しすることがあります」「今から3時間猶予を与えるので強化学習してください」】
+# 前の b2b から3つ変えた(records/counter/start.toml):
+#  ・c4w_response 1→0: 相手の C4W に毎回 C4W で張り合わず、間に合う時だけ対抗する
+#  ・[counter] を足した: 間に合わない時は早撃ちの代わりに「迎え撃ち」(TSD の溝をためて相殺する。打ち消した行 +1.5・届いた行 -0.3)
+#  ・ren_cut -20→-5: REN を切る減点を弱め、テトリスを取れる時に REN のための3列消しを選びにくくする
+# 学習(迎え撃ちの表だけ・ふだんの重みの2回、各1時間)の候補はどちらも出発点に勝てず採らなかった(records/counter/report.txt)。
+# 対 run16(新しい種・1000局、こちら td): td 55.2%(前は 58.5%)・seed3 23.2%(前は 19.8%)・tsd 39.6%(前は 38.0%)。
+#  seed3 相手の1局あたり テトリス 0.31→0.55・TSD 1.27→1.67・B2B 1.15→1.69、C4W で張り合う手 48%→13%(迎え撃ち 34%)。
+# 対 前の b2b(両方 td・1000局): 46.6%(95%信頼区間 40.9〜52.5%)。前の重みは records/counter/b2b_before_counter.toml
+# 【2026-11-14・ユーザー「7時間猶予を与えるので改良と学習をすすめて」】
+# 下の b2b(d3)を出発点と相手に SPSA で 2.4時間学習した後半の平均(records/tune_b2b/r1_avg.toml)。
+# B2B 重視の性格を決める重み(単発・2列の減点、井戸の深さ、TST・C-spin、B2B を保つ加点)と C4W 用の重みは動かしていない。
+# こちらの開幕は ban_c4w。相手の開幕は ban_c4w・td・tsd・seed3 を順に使った(時間ありの対局)。
+# 対 前の b2b(新しい種・1000局・両方 ban_c4w): 勝率 52.6%(95%信頼区間 49.5〜55.7%)、1局あたり テトリス 3.28→3.80・B2B 4.61→5.20・TSD 3.30→3.51。
+# 対 run16(ban_c4w): 60.2%(前の b2b は 59.0%)/ 対 run16(random、C4W を含む): 42.5%(前の b2b は 39.2%)。
+# 2回目の学習(r2)は前の最良に 48.9% で採らなかった。経過は records/tune_b2b/report.txt、前の重みは records/tune_b2b/b2b_before_tune.toml
+# b2b(2026-11-13): B2B 継続重視のモード(TBA のエンジン「KasugAI(B2B重視)」)
+# 【ユーザー「全体的にTSDが少なく単発消しが多い。B2B継続重視のモードを搭載して」「c1 にする」】
+# run16 から: B2B を切った手 -4→-8、単発 -0.74→-2.0、2列 -0.61→-1.5(ほかは run16 のまま)
+# 対 run16(両方 --opening ban_c4w・400局): 勝率 45.0%(95%信頼区間 40.1〜50.1%)、1局あたり TSD 1.91→2.42・
+# B2B 1.70→2.83・テトリス 1.46→1.84、消去の手 43.6%→38.8%(records/b2b_mode/eval.txt の c1)
+# 【2026-11-13・ユーザー「縦穴を作る際にトの字の空間を作る癖があり、テトリス消しができていないことが頻発している」「d3 を入れる」】
+# トの字(TST の溝)の加点が縦穴の深さより大きく、縦穴の横を空けていた。tst_slot 1.23→0.5・tst_slot_low 4.0→0・c_spin 3.89→0・
+# tetris_well_depth -0.17→1.0 にした。対 前の b2b(両方 ban_c4w・400局): 勝率 49.0%(95%信頼区間 43.9〜54.2%)、
+# 1局あたり テトリス 1.61→2.10・B2B 2.57→3.19・TSD 2.32→2.51・TST 0.54→0.52(records/to_shape/eval.txt の d3)。
+# 前の重みは records/to_shape/b2b_before_d3.toml
+# run16(2026-11-09): 8時間の学習の第1回(開幕 C4W なし・2.3時間)の後半の平均。出発点と相手は run15
+# 実機に合わせた1手の時間(キー1回 33ms・ソフトドロップ 1段 33ms)で時間ありの対局。input_keys・soft_drop_rows・
+# soft_drop_non_spin も調整した。第2回・第3回の候補は勝ち越せず採らなかった
+# 対 run15(新しい種): 同じ開幕 no_c4w 50.8%(2000局)・random 54.5% / C4W 相手 24.7%(run15 は 19.3%)/
+# C4W 側 85.6%(run15 は 79.4%)/ 対 CC2 64.2%(run15 は 62.8%)。ソフトドロップの手 5.7%→4.9%
+cell_coveredness = -0.5550093452135721
+max_cell_covered_height = 6
+holes = -1.5337483286857605
+row_transitions = -2.0199747681617737
+height = 0.2788749982913335
+height_upper_half = -2.0681150356928506
+height_upper_quarter = -5.507675329844157
+tetris_well_depth = 1.0
+tslot = [-0.2126183658838272, 1.419977605342865, 5.16987411181132, 2.5865414142608643]
+has_back_to_back = 0.7592986822128296
+wasted_t = -0.752738376458486
+softdrop = -0.20000000298023224
+normal_clears = [0.0, -2.0, -1.5, -2.7227495511372886, 3.154603282610575]
+mini_spin_clears = [0.0, 1.7758880654970806, 0.16438747445742288]
+spin_clears = [0.0, 0.37776772181193036, 8.0, 2.486388683319092]
+back_to_back_clear = 1.3604657649993896
+back_to_back_broken = -8.0
+combo_attack = 1.8003652095794678
+perfect_clear = 19.77515983581543
+perfect_clear_override = true
+soft_drop_section = -0.5
+mid_air_stop = -1.5
+pending_garbage = 0.1472957357764244
+overflow = -8.3968137105306
+attack_sent = 0.0171289867721498
+attack_sent_danger = 2.62565024693807
+lethal = 1.9369163711865742
+threat_overflow = -1.129205862681071
+center_well_rows = 0.8663766384124756
+center_well_side_diff = 0.3894573748111725
+air_tsd_slot = 13.21536668141683
+spawn_margin = 1
+ren_cut = -5.0
+ren_threat_overflow = -0.009129096753895283
+pivot_opening_rows = 2
+c4w_response = 0
+tsd_stock = 0.0
+tsd_low_fire = 0.0
+tsd_counter = 0.01004286715760827
+tsd_hold_height = 8
+center_well_seed = 6.732053279876709
+ren_potential = 1.7004081010818481
+tsd_slot_any = 0.3813137263059616
+pc_chance = -0.011281501210760325
+tetris_tsd_flex = 0.0
+after_pc_seed = false
+after_pc_no_rival = false
+td_attacked_well = false
+td_attacked_clears = 1
+soft_drop_rows = -0.11944861834247907
+soft_drop_non_spin = -3.7131760915120444
+input_keys = -0.050654519349336624
+tst_slot = 0.5
+c_spin = 0.0
+template_piece = 8.0
+opening_tsd = 12.0
+template_bonus_only = false
+tst_slot_low = 0.0
+garbage_hole_overstack = -1.5
+rival_ren = 0.3933930993080139
+rival_deficit = -0.051218707114458084
+rival_early_fire = 0.0027374604251235723
+rival_fire_height = 15
+rush_attack = 1.0205687284469604
+c4w_spawn_danger = false
+rush_pressure = -0.02616266223291556
+rush_lethal = -0.014150747486079732
+rush_height = -0.020774368817607563
+rush_ren_overflow = -0.003678954982509216
+rush_finish = -0.03055033211906751
+
+[counter]
+cell_coveredness = -0.5550093452135721
+max_cell_covered_height = 6
+holes = -1.5337483286857605
+row_transitions = -2.0199747681617737
+height = 0.2788749982913335
+height_upper_half = -2.0681150356928506
+height_upper_quarter = -5.507675329844157
+tetris_well_depth = 1.0
+tslot = [-0.2126183658838272, 1.419977605342865, 5.16987411181132, 2.5865414142608643]
+has_back_to_back = 0.7592986822128296
+wasted_t = -0.752738376458486
+softdrop = -0.20000000298023224
+normal_clears = [0.0, -2.0, -1.5, -2.7227495511372886, 3.154603282610575]
+mini_spin_clears = [0.0, 1.7758880654970806, 0.16438747445742288]
+spin_clears = [0.0, 0.37776772181193036, 1.4316637714703877, 2.486388683319092]
+back_to_back_clear = 1.3604657649993896
+back_to_back_broken = -8.0
+combo_attack = 1.8003652095794678
+perfect_clear = 19.77515983581543
+perfect_clear_override = true
+soft_drop_section = -0.5
+mid_air_stop = -1.5
+pending_garbage = 0.1472957357764244
+overflow = -8.3968137105306
+attack_sent = 0.0171289867721498
+attack_sent_danger = 2.62565024693807
+lethal = 1.9369163711865742
+threat_overflow = -1.129205862681071
+center_well_rows = 0.8663766384124756
+center_well_side_diff = 0.3894573748111725
+air_tsd_slot = 13.21536668141683
+spawn_margin = 1
+ren_cut = -5.0
+ren_threat_overflow = -0.009129096753895283
+pivot_opening_rows = 2
+c4w_response = 1
+tsd_stock = 1.0
+tsd_low_fire = -1.0
+tsd_counter = 1.5
+tsd_hold_height = 8
+center_well_seed = 6.732053279876709
+ren_potential = 1.7004081010818481
+tsd_slot_any = 0.3813137263059616
+pc_chance = -0.011281501210760325
+tetris_tsd_flex = 0.0
+after_pc_seed = false
+after_pc_no_rival = false
+td_attacked_well = false
+td_attacked_clears = 1
+soft_drop_rows = -0.11944861834247907
+soft_drop_non_spin = -3.7131760915120444
+input_keys = -0.050654519349336624
+tst_slot = 0.5
+c_spin = 0.0
+template_piece = 8.0
+opening_tsd = 12.0
+template_bonus_only = false
+tst_slot_low = 0.0
+garbage_hole_overstack = -1.5
+rival_ren = 0.3933930993080139
+rival_deficit = -0.051218707114458084
+rival_early_fire = 0.0027374604251235723
+rival_fire_height = 15
+rush_attack = 1.0205687284469604
+c4w_spawn_danger = false
+rush_pressure = -0.02616266223291556
+rush_lethal = -0.014150747486079732
+rush_height = -0.020774368817607563
+rush_ren_overflow = -0.003678954982509216
+rush_finish = -0.03055033211906751
+counter_cancel = 1.5
+counter_sent = -0.3
+
