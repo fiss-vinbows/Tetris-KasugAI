@@ -95,7 +95,7 @@ TBA で使うプラグインは [Releases](https://github.com/fiss-vinbows/Tetri
 | `config/weights/run16_rush.toml` | 相手が C4W を目指したら、C4W で対抗せずに攻撃で潰す(早撃ち) |
 | `config/weights/cc2_c4w.toml` | 開幕 `seed3` で Cold Clear 2 と戦う専用(run16 から CC2 相手に自動調整) |
 
-古い重みも、調べた時の記録として残しています。どれが何かは各ファイルの先頭と [設計書](docs/DESIGN.md) にあります。
+古い重みも、調べた時の記録として残しています。どれが何かは各ファイルの先頭にあります。
 
 ## 構成
 
@@ -109,7 +109,7 @@ TBA で使うプラグインは [Releases](https://github.com/fiss-vinbows/Tetri
 | `config/weights/` | 評価の重み |
 | `tools/` | Cold Clear 2・TBA との突き合わせなどの道具 |
 | `input/` | TBA のシミュレーターで作った局面の画像(局面テストの元) |
-| `docs/` | [設計書](docs/DESIGN.md) |
+| `docs/images/` | README のロゴの画像 |
 
 ## 開発
 
