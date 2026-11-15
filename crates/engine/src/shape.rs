@@ -191,14 +191,23 @@ pub fn ren_rows(board: &Board) -> u32 {
 /// せり上がった部分から REN がつながる」】REN で中あけの行を消し切ると、それより上に積んだブロックが落ちてきて穴をふさぐ。
 /// 中あけの行より下で一番上のおじゃま(9マス埋まった行)の穴が左右の列(x=0〜2・7〜9)にある時だけ数える
 /// (中央4列の穴は中あけの上から届くので数えない)。中あけの行が無ければ 0。
+///
+/// 【2026-11-15・ユーザー「C4Wを組む時、せり上がりの穴がある列をなるべく高く組まないように」】一番上のおじゃまの穴が
+/// 中央4列にあると 0 を返し、その下のおじゃまの左右の穴(中央の穴の行を消すと次に開ける穴)を見ていなかった。
+/// 穴が中央4列にあるおじゃまの行は飛ばし、その下で最初に穴が左右の列にある行の穴を数える。
 pub fn garbage_hole_overstack(board: &Board) -> u32 {
     let height = board.max_height();
     let Some(start) = (0..height).find(|&y| row(board, y) == SIDES) else { return 0 };
     let top = (start..height).take_while(|&y| row(board, y) == SIDES).last().map_or(start, |y| y + 1);
-    let Some(hole_row) = (0..start).rev().map(|y| row(board, y)).find(|r| r.count_ones() == WIDTH as u32 - 1) else {
+    let Some(hole) = (0..start)
+        .rev()
+        .map(|y| row(board, y))
+        .filter(|r| r.count_ones() == WIDTH as u32 - 1)
+        .map(|r| (!r & ROW_FULL).trailing_zeros() as usize)
+        .find(|&x| !(3..=6).contains(&x))
+    else {
         return 0;
     };
-    let hole = (!hole_row & ROW_FULL).trailing_zeros() as usize;
     let neighbors: [usize; 2] = match hole {
         0 => [1, 2],
         1 => [0, 2],
@@ -416,6 +425,12 @@ mod tests {
         // 穴が中央4列にあれば数えない(中あけの上から届く)
         let center = Board::from_rows(&["......#...", "###....###", "###....###", "#####.####"]);
         assert_eq!(garbage_hole_overstack(&center), 0);
+        // 2026-11-15 ユーザーの局面: 一番上のおじゃまの穴は中央(3列目)。その下の行の穴(2列目)を数える
+        let under_center = Board::from_rows(&["..#.......", "..#.......", "###....###", "###....###", "###.######", "##.#######", "#.########"]);
+        assert_eq!(garbage_hole_overstack(&under_center), 2, "2列目が中あけの上と0・1列目より2段高い");
+        // 中央の穴の行の下が中央の穴だけなら数えない
+        let all_center = Board::from_rows(&["..#.......", "###....###", "###.######", "####.#####"]);
+        assert_eq!(garbage_hole_overstack(&all_center), 0);
         // 中あけの行が無ければ数えない
         assert_eq!(garbage_hole_overstack(&Board::from_rows(&["#######...", "#######.##"])), 0);
         // 左の穴: 0列目だけ高い
