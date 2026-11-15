@@ -299,6 +299,7 @@ pub fn search(
         gauge: root.gauge,
         strategy: root.strategy,
         opponent_cancel: root.opponent.map_or(0, |o| crate::eval::opponent_cancel(rules, o.gauge)),
+        own_danger: root.state.board.max_height() + incoming_total,
     };
     let mut nodes = 0u64;
     let mut moves = Vec::with_capacity(64);

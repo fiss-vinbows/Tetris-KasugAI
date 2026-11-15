@@ -451,6 +451,20 @@ fn 構想_相手が高い時だけ相殺を外す() {
     assert_eq!(none, 2, "相手の情報なし: すぐ TSD で相殺していない: {clears:?}");
 }
 
+/// 【2026-11-15・ユーザー「以前提案した相殺外しの概念は活用されていますか？」】標準の重み(run16)でも、相手が高い時だけ相殺を外す。
+/// 自動調整した重みは、相手が低くても情報が無くても受けてから撃つようになっていた(cancel_danger・garbage_height_no_bonus で直した)
+#[test]
+fn 標準の重みでも相手が高い時だけ相殺を外す() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/weights/run16.toml");
+    let w: Weights = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let (high, clears) = first_move_clears(&counter_position(17), &w);
+    assert_eq!(high, 0, "相手17段: 1手目で消して相殺した: {clears:?}");
+    let (low, clears) = first_move_clears(&counter_position(4), &w);
+    assert_eq!(low, 2, "相手4段: すぐ TSD で相殺していない: {clears:?}");
+    let (none, clears) = first_move_clears(&Root { opponent: None, ..counter_position(17) }, &w);
+    assert_eq!(none, 2, "相手の情報なし: すぐ TSD で相殺していない: {clears:?}");
+}
+
 /// 相手が大きく育てた C4W(種3 + 中あけ8行)。
 fn opponent_c4w() -> tetrisai_engine::Opponent {
     let mut rows = vec!["###....###"; 8];

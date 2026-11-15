@@ -72,6 +72,15 @@ pub struct Weights {
     pub attack_sent: f32,
     /// 相手に届く攻撃1行あたり × 相手の危なさ(相手の高さ + 相手への予告、20段で1)
     pub attack_sent_danger: f32,
+    /// true なら、自分への予告を打ち消した(相殺した)攻撃1行にも、`attack_sent_danger` × 自分の危なさ(探索の最初の盤面の高さ
+    /// + 予告の行数、20段で1)の点を付ける。届けるか相殺するかを、相手と自分のどちらが危ないかで比べる。
+    /// 【2026-11-15・ユーザー「以前提案した相殺外しの概念は活用されていますか？」】届けた行にだけ相手の危なさの点が付くと、
+    /// 相手が低くても予告を受けてから撃って多く届ける手が得になり、相手を見ずにいつも相殺を外していた(run16・b2b)
+    #[serde(default)]
+    pub cancel_danger: bool,
+    /// true なら、`height` が正の時に、予告(受けるおじゃま)の分の高さには `height` の点を付けない
+    #[serde(default)]
+    pub garbage_height_no_bonus: bool,
     /// 届く攻撃(攻撃ゲージを含む)が相手の残りの余裕(20段 − 相手の危なさ)以上になる(とどめ)
     pub lethal: f32,
     /// 自分の高さ(予告を含む)+ 相手が次に撃てる攻撃の見積もり が20段を超える分(1段あたり)
@@ -302,6 +311,8 @@ pub struct BattleContext {
     pub strategy: Strategy,
     /// 相手が REN 中なら、相手の次の1手が打ち消す行数の見積もり(`opponent_cancel`。2026-11-09)
     pub opponent_cancel: u32,
+    /// 自分の危なさ(探索の最初の盤面の高さ + 予告の行数。`Weights::cancel_danger` で使う。2026-11-15)
+    pub own_danger: u32,
 }
 
 /// 相手の次の1手が、届いた攻撃を打ち消す行数の見積もり。相手の攻撃ゲージ(REN の攻撃の合計)から REN 数を逆算し、
@@ -359,6 +370,8 @@ impl Default for Weights {
             overflow: -10.0,
             attack_sent: 0.0,
             attack_sent_danger: 0.5,
+            cancel_danger: false,
+            garbage_height_no_bonus: false,
             lethal: 20.0,
             threat_overflow: -2.0,
             center_well_rows: 0.0,
@@ -552,7 +565,13 @@ pub fn evaluate(w: &Weights, rules: &Rules, board: &Board, back_to_back: bool, c
     if top > 20 {
         e += w.overflow * (top - 20) as f32;
     }
-    e += w.height * top as f32;
+    // 【2026-11-15】高さの点が正(C4W の壁を高く積む向き)でも、受けるおじゃまの分には付けない(付けると、低い時は
+    // 予告を相殺せずに受ける方が得になり、相手を見ずに相殺を外していた: run16 の height は +0.30)
+    e += if w.garbage_height_no_bonus && w.height > 0.0 {
+        w.height * board.max_height() as f32
+    } else {
+        w.height * top as f32
+    };
     if top > 10 {
         e += w.height_upper_half * (top - 10) as f32;
     }
@@ -720,6 +739,9 @@ pub fn battle_value(w: &Weights, ctx: &BattleContext, outgoing: u32, chunk: u32,
     }
     if let Some(danger) = ctx.opponent_danger {
         v += w.attack_sent_danger * outgoing as f32 * (danger as f32 / 20.0);
+        if w.cancel_danger {
+            v += w.attack_sent_danger * cancelled as f32 * (ctx.own_danger as f32 / 20.0);
+        }
         let margin = 20u32.saturating_sub(danger);
         if outgoing > 0 && ctx.gauge + outgoing >= margin {
             v += w.lethal;
@@ -849,6 +871,37 @@ mod tests {
         // 相手の情報が無ければ、届く攻撃の点(既定 0)だけ
         let none = BattleContext::default();
         assert_eq!(battle_value(&w, &none, 4, 4, 5, 0), 0.0);
+    }
+
+    #[test]
+    fn 相殺した行にも自分の危なさの点を付ける() {
+        // 【2026-11-15】自分は7段(盤面5段 + 予告2行)。2行を相殺すると 2.0 × 2行 × 7/20 = 1.4
+        let w = Weights { attack_sent_danger: 2.0, lethal: 0.0, cancel_danger: true, ..Weights::default() };
+        let ctx = BattleContext { opponent_danger: Some(4), own_danger: 7, ..Default::default() };
+        assert!((battle_value(&w, &ctx, 0, 0, 7, 2) - 1.4).abs() < 1e-5);
+        // 相手(4段)が自分より低ければ、2行届けるより2行相殺する方が点が高い
+        assert!(battle_value(&w, &ctx, 2, 2, 7, 2) > battle_value(&w, &ctx, 4, 4, 7, 0));
+        // 相手が17段なら、受けてから4行届ける方が点が高い
+        let high = BattleContext { opponent_danger: Some(17), ..ctx };
+        assert!(battle_value(&w, &high, 4, 4, 7, 0) > battle_value(&w, &high, 2, 2, 7, 2));
+        // 相手の情報が無ければ付けない(届く攻撃の点と同じ)
+        let none = BattleContext { own_danger: 7, ..Default::default() };
+        assert_eq!(battle_value(&w, &none, 0, 0, 7, 2), 0.0);
+    }
+
+    #[test]
+    fn 受けるおじゃまの高さには正の高さの点を付けない() {
+        let rules = Rules::ppt2();
+        let board = Board::from_rows(&["#########."; 3]);
+        let garbage = EvalContext { garbage: Garbage { extra_height: 2, pending: 0 }, ..Default::default() };
+        let w = Weights { height: 0.3, ..Weights::default() };
+        let fixed = Weights { garbage_height_no_bonus: true, ..w.clone() };
+        let gain = |w: &Weights| evaluate(w, &rules, &board, false, &garbage) - evaluate(w, &rules, &board, false, &EvalContext::default());
+        assert!((gain(&w) - 0.6).abs() < 1e-5, "今までは2行受けると +0.6");
+        assert_eq!(gain(&fixed), 0.0);
+        // 高さの点が負なら、今までどおり受ける分も減点する
+        let neg = Weights { height: -0.3, garbage_height_no_bonus: true, ..Weights::default() };
+        assert!((gain(&neg) + 0.6).abs() < 1e-5);
     }
 
     #[test]
