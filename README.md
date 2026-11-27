@@ -4,7 +4,7 @@
 
 ぷよぷよテトリス2 のテトリス対戦を対象にした、Rust 製の自作テトリスAIです。
 
-全自動・支援ツール [TBA(Tetris Beginner Assistance)](#tba-との関係) の思考エンジンとして使っています。Tetris Bot Protocol(TBP)に対応しています。
+支援ツール [UED(Universal Engine Dock)](https://github.com/fiss-vinbows/Universal_Engine_Dock) の思考エンジンとして使っています。Tetris Bot Protocol(TBP)に対応しています。
 
 ## 特徴
 
@@ -38,10 +38,10 @@
 REN 8 以上を撃っています。Cold Clear 2 の負けの1割ほどは、壁に止められて届かない手を返した「反則」です。
 
 - 既定の開幕(TDテンプレか素の積み)では、標準の重みは互角、B2B 重視の重み(TSD の点を大きくし、相手の C4W には
-  迎え撃つ)は勝ち越しています。打ち方は TBA の全自動の設定で選べます(`config/weights/styles.toml`)。
+  迎え撃つ)は勝ち越しています。打ち方は bot の `--opening` の `style=` で選べます(`config/weights/styles.toml`)。
 - `cc2_c4w` は run16 から、開幕 seed3 で Cold Clear 2 と戦う局だけで自動調整した重みです(`tune --vs-cc2`)。
   同じミノ列で比べると run16 より勝ちますが、既定の開幕では run16 より下がる向き(43.7% 対 47.3%、300局)なので、
-  seed3 で Cold Clear 2 と戦う時の専用です。TBA の打ち方には入れていません。
+  seed3 で Cold Clear 2 と戦う時の専用です。`styles.toml` の打ち方には入れていません。
 - 開幕に開幕パフェを混ぜる(`seed3+pco`)と 58.3%、TD・TSD・種3 から選ぶ(`random`)と 54.6% に下がりました(240局ずつ)。
 
 次のコマンドで同じ対戦ができます(重みと開幕を表に合わせて変えます。CC2 の思考は `--think-ms 300`)。
@@ -83,13 +83,13 @@ target/release/tetrisai-bot.exe --config config/weights/run16.toml --opening no_
 
 細かく選ぶ時は「`td+tsd+seed3+pco`」のように開幕を `+` でつなぎます(対局ごとに均等に選ぶ。`pco` は組める見込みがあれば先に狙う。何も選ばない時は `plain`)。`no_mid_c4w` を足すと中盤も C4W を使いません(開幕C4W を選んだ局を除く)。`style=名前` を足すと、`--config` と同じフォルダの `styles.toml` で引いた重み(`standard` は run16、`b2b` は B2B 重視)を `--config` の代わりに読みます(例: `--opening td+tsd+no_mid_c4w+style=b2b`)。ほかのオプションは `crates/bot/src/main.rs` の先頭に書いてあります。
 
-TBA で使うプラグインは [Releases](https://github.com/fiss-vinbows/Tetris-KasugAI/releases) にあります。
+[UED](https://github.com/fiss-vinbows/Universal_Engine_Dock) には KasugAI の bot と重みが同梱されています。作った bot と重みは [Releases](https://github.com/fiss-vinbows/Tetris-KasugAI/releases) にもあります。
 
 ### 重み
 
 | ファイル | 内容 |
 |---|---|
-| `config/weights/run16.toml` | 標準(TBA で使っている重み) |
+| `config/weights/run16.toml` | 標準([UED](https://github.com/fiss-vinbows/Universal_Engine_Dock) に同梱している重み) |
 | `config/weights/run16_shape.toml` | run16 + テトリスと TSD の両対応の形を良形にする・パフェの後に C4W に向かわない |
 | `config/weights/run17_td.toml` | TDテンプレを前提にした重み(`--opening td` で使う。速攻を受けたら TSD の後に C4W へ) |
 | `config/weights/run16_rush.toml` | 相手が C4W を目指したら、C4W で対抗せずに攻撃で潰す(早撃ち) |
@@ -184,9 +184,11 @@ TBA の自己対戦を Cold Clear 2 と bot で並べて比べます。
 cargo run --release --example bench_movegen
 ```
 
-## TBA との関係
+## UED との関係
 
-TBA はぷよテト2の画面とメモリを読んで操作する、別のプロジェクトです。このリポジトリの隣のフォルダ(`../Tetris`)に置く前提で、道具の一部が参照しています。TBA は `config/engine.json` で指定した bot と重みを使います。bot を作り直す時は、TBA が古い exe を使っていないか確かめてください。古い exe は新しい重みの項目を読めずにエラーになります。
+[UED(Universal Engine Dock)](https://github.com/fiss-vinbows/Universal_Engine_Dock) は、ぷよテト2の盤面を画面から読み取り、選んだ思考エンジンの次の手を表示する別のプロジェクトです。KasugAI の bot と重みを同梱しています。bot を作り直す時は、UED が古い exe を使っていないか確かめてください。古い exe は新しい重みの項目を読めずにエラーになります。
+
+開発の道具の一部(`tools/crosscheck_tba.py`・`tools/tba_harness.py`・`input/`)は、前に使っていた [TBA(Tetris Beginner Assistance)](https://github.com/fiss-vinbows/Tetris-Beginner-Assistance) を、このリポジトリの隣のフォルダ(`../Tetris`)に置く前提です。
 
 ## ライセンス
 
